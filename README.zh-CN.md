@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/surge-vless-bridge.svg)](https://www.npmjs.com/package/surge-vless-bridge)
 [![npm downloads](https://img.shields.io/npm/dm/surge-vless-bridge.svg)](https://www.npmjs.com/package/surge-vless-bridge)
+[![macOS 双架构构建](https://github.com/kankankankankankan/surge-vless-bridge/actions/workflows/build-macos.yml/badge.svg)](https://github.com/kankankankankan/surge-vless-bridge/actions/workflows/build-macos.yml)
 
 [English README](./README.md) · [更新日志](./CHANGELOG.zh-CN.md)
 
@@ -33,6 +34,9 @@ npm run desktop:package
 ```
 
 详细操作和恢复方法见 [macOS 桌面应用指南](./docs/desktop-app.zh-CN.md)。
+
+GitHub Actions 会在原生 Intel 和 Apple 芯片 runner 上分别构建。Intel Mac 下载 `x64`，M 系列 Mac 下载
+`arm64`，成品位于对应工作流运行记录的 Artifacts 区域。
 
 ## 让 AI Agent 帮你完成配置
 

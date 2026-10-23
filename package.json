@@ -55,6 +55,7 @@
   "build": {
     "appId": "com.chen86860.surgevlessbridge",
     "productName": "Surge VLESS Bridge",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
       "dist/**/*.js",

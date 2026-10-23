@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Build and verify native Intel x86_64 and Apple Silicon arm64 DMGs with GitHub Actions, then upload each architecture with its SHA256 checksum.
+
+### Fixed
+
+- Require a manual workflow run and the `npm-publish` environment before publishing to npm, preventing fork pushes from creating failed publish runs.
+
 ## [1.5.19] - 2026-10-24
 
 ### Fixed

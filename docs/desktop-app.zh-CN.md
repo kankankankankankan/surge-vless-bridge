@@ -155,6 +155,27 @@ Homebrew 来源保持由 Homebrew 管理：首次安装执行 `brew install sing
 
 ## 打包
 
+### GitHub Actions 自动构建
+
+`.github/workflows/build-macos.yml` 会在以下场景运行：
+
+1. 推送到 `master`。
+2. 推送 `v*` 标签。
+3. 修改桌面应用相关文件的 Pull Request。
+4. 在 GitHub Actions 页面手动运行。
+
+工作流使用两个原生 macOS runner：
+
+| 成品 | GitHub runner | 架构 |
+| --- | --- | --- |
+| Intel Mac | `macos-15-intel` | `x86_64` |
+| Apple 芯片 Mac | `macos-15` | `arm64` |
+
+每个任务都会运行完整测试、构建桌面资源、生成 DMG、检查应用资源、验证后台任务入口、校验签名和实际架构，
+并执行 `hdiutil verify`。通过后上传 DMG 与 SHA256 文件，Artifacts 默认保留 14 天。
+
+### 本地打包
+
 生成应用图标：
 
 ```bash

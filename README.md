@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/surge-vless-bridge.svg)](https://www.npmjs.com/package/surge-vless-bridge)
 [![npm downloads](https://img.shields.io/npm/dm/surge-vless-bridge.svg)](https://www.npmjs.com/package/surge-vless-bridge)
+[![Build macOS App](https://github.com/kankankankankankan/surge-vless-bridge/actions/workflows/build-macos.yml/badge.svg)](https://github.com/kankankankankankan/surge-vless-bridge/actions/workflows/build-macos.yml)
 
 [中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
 
@@ -28,6 +29,9 @@ npm run desktop
 ```
 
 See the [desktop app guide](./docs/desktop-app.zh-CN.md) for packaging, scheduling, and recovery details.
+
+GitHub Actions builds both macOS architectures on native runners. Download `x64` for Intel Macs and
+`arm64` for Apple Silicon from the workflow run's Artifacts section.
 
 ## Setting this up with an AI agent
 

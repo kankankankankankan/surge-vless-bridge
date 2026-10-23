@@ -5,6 +5,16 @@
 本文件记录项目的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## 未发布
+
+### 新增
+
+- GitHub Actions 使用原生 Intel x86_64 和 Apple 芯片 arm64 runner 构建并验证 DMG，同时上传各架构安装包和 SHA256 校验文件。
+
+### 修复
+
+- npm 发布改为手动运行并要求 `npm-publish` 环境，避免 fork 每次推送都产生无权限的发布失败记录。
+
 ## [1.5.19] - 2026-10-24
 
 ### 修复

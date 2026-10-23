@@ -1,11 +1,6 @@
 name: Publish Package
 
 on:
-  push:
-    branches:
-      - master
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -14,6 +9,7 @@ permissions:
 
 jobs:
   publish:
+    environment: npm-publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
