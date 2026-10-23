@@ -8,11 +8,12 @@ import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { getVlessSubscriptionNodes } from './parse';
-import type { AddressResolverConfig, CliConfig } from './types/cli-config';
+import type { AddressResolverConfig, CliConfig, PolicyGroupTargetMode } from './types/cli-config';
 import type { SingBoxVlessOutbound } from './types/sing-box-vless-outbound';
 import { parseTemplate } from './utils/parse-template';
 import { pathExists, readJsonFile, readTextFile, writeBinaryFile, writeTextFile } from './utils/fs';
 import { parseVlessNode } from './utils/parse-vless-node';
+import { stopManagedSingBoxProcesses } from './utils/managed-processes';
 import { parseHttpApiSettings, reloadSurgeProfile } from './utils/surge-reload';
 
 const POLICY_REGEX_FILTER = /^((?!Remain|Expired|官网|如需|套餐|去除|剩余|距离|Reset|重置|流量).)+$/;
@@ -257,10 +258,27 @@ const buildExternalProxyLine = async ({
   server,
   singBoxBinary,
   addressResolver,
-}: GeneratedNode & { singBoxBinary: string; addressResolver: AddressResolverConfig }) => {
+  udpRelay,
+  udpTestEnabled,
+  udpTestTarget,
+}: GeneratedNode & {
+  singBoxBinary: string;
+  addressResolver: AddressResolverConfig;
+  udpRelay: boolean;
+  udpTestEnabled: boolean;
+  udpTestTarget: string;
+}) => {
   const addresses = await resolveAddresses(server, addressResolver);
   const addressArg = addresses.length > 0 ? `, addresses=${addresses[0]}` : '';
-  return `${nodeName} = external, exec=${singBoxBinary}, args=run, args=-c, args=${configPath}, local-port=${port}${addressArg}`;
+  const udpRelayArg = udpRelay ? ', udp-relay=true' : '';
+  if (udpRelay && udpTestEnabled) {
+    const [hostname, address, extra] = udpTestTarget.split('@');
+    if (!hostname || /\s/.test(hostname) || !address || extra || isIP(address) !== 4) {
+      throw new Error(`Invalid UDP test target: ${udpTestTarget}. Expected hostname@IPv4.`);
+    }
+  }
+  const udpTestArg = udpRelay && udpTestEnabled ? `, test-udp=${udpTestTarget}` : '';
+  return `${nodeName} = external, exec=${singBoxBinary}, args=run, args=-c, args=${configPath}, local-port=${port}${addressArg}${udpRelayArg}${udpTestArg}`;
 };
 
 const ensureRequiredConfig = (config: CliConfig) => {
@@ -401,6 +419,411 @@ const updatePolicyGroup = ({
   });
 };
 
+type PolicyGroupToken = {
+  value: string;
+  start: number;
+  end: number;
+  separatorBefore?: number;
+};
+
+const splitPolicyGroupTokens = (value: string): PolicyGroupToken[] => {
+  const tokens: PolicyGroupToken[] = [];
+  let start = 0;
+  let separatorBefore: number | undefined;
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === ',') {
+      tokens.push({ value: value.slice(start, index).trim(), start, end: index, separatorBefore });
+      separatorBefore = index;
+      start = index + 1;
+    }
+  }
+
+  tokens.push({ value: value.slice(start).trim(), start, end: value.length, separatorBefore });
+  return tokens;
+};
+
+const findInlineRequirementIndex = (value: string) => {
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+
+  for (let index = 0; index < value.length - 1; index += 1) {
+    const character = value[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '#' && value[index + 1] === '!' && (index === 0 || /\s/.test(value[index - 1]!))) {
+      return index;
+    }
+  }
+
+  return value.length;
+};
+
+const policyGroupParameterIndex = (tokens: PolicyGroupToken[]) =>
+  tokens.findIndex((token, index) => index > 0 && /^[A-Za-z][A-Za-z0-9-]*\s*=/.test(token.value));
+
+const includeOtherGroupNames = (tokens: PolicyGroupToken[]) => {
+  const token = tokens.find((entry) => /^include-other-group\s*=/i.test(entry.value));
+  if (!token) {
+    return [];
+  }
+
+  const rawValue = token.value.slice(token.value.indexOf('=') + 1).trim();
+  const quote =
+    rawValue.length >= 2 &&
+    (rawValue[0] === '"' || rawValue[0] === "'") &&
+    rawValue.at(-1) === rawValue[0]
+      ? rawValue[0]
+      : undefined;
+  const value = quote ? rawValue.slice(1, -1) : rawValue;
+  return value
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+};
+
+const hasPolicyGroupParameter = (tokens: PolicyGroupToken[], name: string) =>
+  tokens.some((token) => new RegExp(`^${escapeRegExp(name)}\\s*=`, 'i').test(token.value));
+
+const resolvePolicyGroupTargetMode = (
+  tokens: PolicyGroupToken[],
+  requestedMode: PolicyGroupTargetMode,
+): Exclude<PolicyGroupTargetMode, 'auto'> => {
+  if (requestedMode !== 'auto') {
+    return requestedMode;
+  }
+
+  const groupType = tokens[0]?.value.toLowerCase();
+  return groupType === 'smart' ||
+    hasPolicyGroupParameter(tokens, 'include-other-group') ||
+    hasPolicyGroupParameter(tokens, 'policy-regex-filter')
+    ? 'merge'
+    : 'reference';
+};
+
+export const inspectPolicyGroups = ({ surgeText, policyGroupName }: { surgeText: string; policyGroupName: string }) => {
+  const section = surgeText.match(/\[Proxy Group\]([\s\S]*?)(?=\n\[|$)/)?.[1];
+  if (!section) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  return section.split('\n').flatMap((line) => {
+    const equalsIndex = line.indexOf('=');
+    if (equalsIndex < 0 || line.trimStart().startsWith('#')) {
+      return [];
+    }
+
+    const name = line.slice(0, equalsIndex).trim();
+    if (!name || name === policyGroupName || seen.has(name)) {
+      return [];
+    }
+    seen.add(name);
+
+    const right = line.slice(equalsIndex + 1);
+    const definition = right.slice(0, findInlineRequirementIndex(right));
+    const tokens = splitPolicyGroupTokens(definition);
+    const parameterIndex = policyGroupParameterIndex(tokens);
+    const memberEnd = parameterIndex < 0 ? tokens.length : parameterIndex;
+    const containsDirectMember = tokens.slice(1, memberEnd).some((token) => token.value === policyGroupName);
+    const containsIncludedGroup = includeOtherGroupNames(tokens).includes(policyGroupName);
+    const groupType = tokens[0]?.value.toLowerCase() ?? '';
+    const hasIncludeOtherGroup = hasPolicyGroupParameter(tokens, 'include-other-group');
+    const hasPolicyRegexFilter = hasPolicyGroupParameter(tokens, 'policy-regex-filter');
+    const membershipMode: 'merge' | 'reference' | 'both' | undefined =
+      containsDirectMember && containsIncludedGroup
+        ? 'both'
+        : containsIncludedGroup
+          ? 'merge'
+          : containsDirectMember
+            ? 'reference'
+            : undefined;
+
+    return [
+      {
+        name,
+        containsPolicyGroup: containsDirectMember || containsIncludedGroup,
+        membershipMode,
+        groupType,
+        hasIncludeOtherGroup,
+        hasPolicyRegexFilter,
+        recommendedMode: resolvePolicyGroupTargetMode(tokens, 'auto'),
+      },
+    ];
+  });
+};
+
+const removeDirectPolicyGroupMembers = (definition: string, memberName: string) => {
+  let updated = definition;
+
+  while (true) {
+    const tokens = splitPolicyGroupTokens(updated);
+    const parameterIndex = policyGroupParameterIndex(tokens);
+    const memberEnd = parameterIndex < 0 ? tokens.length : parameterIndex;
+    const memberIndex = tokens.findIndex(
+      (token, index) => index > 0 && index < memberEnd && token.value === memberName,
+    );
+    if (memberIndex < 0) {
+      return updated;
+    }
+
+    const token = tokens[memberIndex]!;
+    updated = `${updated.slice(0, token.separatorBefore!)}${updated.slice(token.end)}`;
+  }
+};
+
+const replacePolicyGroupToken = (definition: string, token: PolicyGroupToken, replacement: string) => {
+  const rawToken = definition.slice(token.start, token.end);
+  const leadingSpace = rawToken.match(/^\s*/)?.[0] ?? '';
+  const trailingSpace = rawToken.match(/\s*$/)?.[0] ?? '';
+  return `${definition.slice(0, token.start)}${leadingSpace}${replacement}${trailingSpace}${definition.slice(token.end)}`;
+};
+
+const updateIncludedPolicyGroup = (definition: string, memberName: string, action: 'add' | 'remove') => {
+  const tokens = splitPolicyGroupTokens(definition);
+  const parameterIndex = policyGroupParameterIndex(tokens);
+  const includeToken = tokens.find((token) => /^include-other-group\s*=/i.test(token.value));
+
+  if (!includeToken) {
+    if (action === 'remove') {
+      return definition;
+    }
+
+    if (parameterIndex >= 0) {
+      const insertionIndex = tokens[parameterIndex]!.separatorBefore!;
+      return `${definition.slice(0, insertionIndex)}, include-other-group=${memberName}${definition.slice(insertionIndex)}`;
+    }
+
+    const trailingSpace = definition.match(/\s*$/)?.[0] ?? '';
+    return `${definition.slice(0, definition.length - trailingSpace.length)}, include-other-group=${memberName}${trailingSpace}`;
+  }
+
+  const equalsIndex = includeToken.value.indexOf('=');
+  const prefix = includeToken.value.slice(0, equalsIndex + 1);
+  const rawValue = includeToken.value.slice(equalsIndex + 1).trim();
+  const existingQuote =
+    rawValue.length >= 2 &&
+    (rawValue[0] === '"' || rawValue[0] === "'") &&
+    rawValue.at(-1) === rawValue[0]
+      ? rawValue[0]
+      : undefined;
+  const names = includeOtherGroupNames([includeToken]).filter((name) => name !== memberName);
+  if (action === 'add') {
+    names.push(memberName);
+  }
+
+  if (names.length === 0) {
+    return `${definition.slice(0, includeToken.separatorBefore!)}${definition.slice(includeToken.end)}`;
+  }
+
+  const quote = existingQuote ?? (names.length > 1 ? '"' : '');
+  const value = `${quote}${names.join(',')}${quote}`;
+  return replacePolicyGroupToken(definition, includeToken, `${prefix}${value}`);
+};
+
+const updatePolicyGroupMember = (
+  line: string,
+  memberName: string,
+  action: 'add' | 'remove',
+  requestedMode: PolicyGroupTargetMode = 'auto',
+) => {
+  const equalsIndex = line.indexOf('=');
+  if (equalsIndex < 0) {
+    return line;
+  }
+
+  const right = line.slice(equalsIndex + 1);
+  const requirementIndex = findInlineRequirementIndex(right);
+  let definition = right.slice(0, requirementIndex);
+  const requirement = right.slice(requirementIndex);
+  let tokens = splitPolicyGroupTokens(definition);
+  const groupType = tokens[0]?.value.toLowerCase();
+  const resolvedMode = resolvePolicyGroupTargetMode(tokens, requestedMode);
+
+  if (action === 'remove') {
+    definition = removeDirectPolicyGroupMembers(definition, memberName);
+    definition = updateIncludedPolicyGroup(definition, memberName, 'remove');
+  } else if (resolvedMode === 'merge') {
+    definition = removeDirectPolicyGroupMembers(definition, memberName);
+    definition = updateIncludedPolicyGroup(definition, memberName, 'add');
+  } else {
+    if (groupType === 'smart') {
+      throw new Error(`Smart policy group cannot reference ${memberName} directly: ${line.slice(0, equalsIndex).trim()}`);
+    }
+    definition = updateIncludedPolicyGroup(definition, memberName, 'remove');
+    tokens = splitPolicyGroupTokens(definition);
+    const parameterIndex = policyGroupParameterIndex(tokens);
+    const memberEnd = parameterIndex < 0 ? tokens.length : parameterIndex;
+    const containsDirectMember = tokens
+      .slice(1, memberEnd)
+      .some((token) => token.value === memberName);
+
+    if (includeOtherGroupNames(tokens).includes(memberName)) {
+      definition = updateIncludedPolicyGroup(definition, memberName, 'remove');
+    }
+    if (containsDirectMember) {
+      return `${line.slice(0, equalsIndex + 1)}${definition}${requirement}`;
+    } else if (parameterIndex >= 0) {
+      const insertionIndex = tokens[parameterIndex]!.separatorBefore!;
+      definition = `${definition.slice(0, insertionIndex)}, ${memberName}${definition.slice(insertionIndex)}`;
+    } else {
+      const trailingSpace = definition.match(/\s*$/)?.[0] ?? '';
+      definition = `${definition.slice(0, definition.length - trailingSpace.length)}, ${memberName}${trailingSpace}`;
+    }
+  }
+
+  return `${line.slice(0, equalsIndex + 1)}${definition}${requirement}`;
+};
+
+const configuredPolicyGroupTargets = (config: CliConfig) => [
+  ...new Set(
+    (config.policyGroupTargets ?? [])
+      .filter((name): name is string => typeof name === 'string')
+      .map((name) => name.trim())
+      .filter((name) => name && name !== config.policyGroupName),
+  ),
+];
+
+const configuredPolicyGroupExclusions = (config: CliConfig) => {
+  const targets = new Set(configuredPolicyGroupTargets(config));
+  return [
+    ...new Set(
+      (config.policyGroupExclusions ?? [])
+        .filter((name): name is string => typeof name === 'string')
+        .map((name) => name.trim())
+        .filter((name) => name && name !== config.policyGroupName && !targets.has(name)),
+    ),
+  ];
+};
+
+const configuredPolicyGroupTargetModes = (config: CliConfig) =>
+  Object.fromEntries(
+    configuredPolicyGroupTargets(config).map((name) => [name, config.policyGroupTargetModes?.[name] ?? 'auto']),
+  ) as Record<string, PolicyGroupTargetMode>;
+
+const updatePolicyGroupTargets = ({
+  surgeText,
+  policyGroupName,
+  targetNames,
+  action,
+  targetModes = {},
+}: {
+  surgeText: string;
+  policyGroupName: string;
+  targetNames: string[];
+  action: 'add' | 'remove';
+  targetModes?: Record<string, PolicyGroupTargetMode>;
+}) => {
+  if (targetNames.length === 0) {
+    return surgeText;
+  }
+
+  const sectionPattern = /(\[Proxy Group\])([\s\S]*?)(?=\n\[|$)/;
+  const found = new Set<string>();
+  const updated = surgeText.replace(sectionPattern, (_match, sectionTitle: string, sectionBody: string) => {
+    const lines = sectionBody.split('\n').map((line) => {
+      const equalsIndex = line.indexOf('=');
+      if (equalsIndex < 0 || line.trimStart().startsWith('#')) {
+        return line;
+      }
+
+      const name = line.slice(0, equalsIndex).trim();
+      if (!targetNames.includes(name)) {
+        return line;
+      }
+
+      found.add(name);
+      return updatePolicyGroupMember(line, policyGroupName, action, targetModes[name] ?? 'auto');
+    });
+    return `${sectionTitle}${lines.join('\n')}`;
+  });
+
+  if (action === 'add') {
+    const missing = targetNames.filter((name) => !found.has(name));
+    if (missing.length > 0) {
+      throw new Error(`Policy groups not found in [Proxy Group]: ${missing.join(', ')}`);
+    }
+  }
+
+  return updated;
+};
+
+const policyGroupLines = (surgeText: string) => {
+  const section = surgeText.match(/\[Proxy Group\]([\s\S]*?)(?=\n\[|$)/)?.[1];
+  const lines = new Map<string, string>();
+  for (const line of section?.split('\n') ?? []) {
+    const equalsIndex = line.indexOf('=');
+    if (equalsIndex < 0 || line.trimStart().startsWith('#')) {
+      continue;
+    }
+    const name = line.slice(0, equalsIndex).trim();
+    if (name) {
+      lines.set(name, line);
+    }
+  }
+  return lines;
+};
+
+const policyGroupChangePreview = ({ source, updated, config }: { source: string; updated: string; config: CliConfig }) => {
+  const beforeLines = policyGroupLines(source);
+  const afterLines = policyGroupLines(updated);
+  const targets = new Set(configuredPolicyGroupTargets(config));
+  const names = [...targets, ...configuredPolicyGroupExclusions(config)];
+  const targetModes = configuredPolicyGroupTargetModes(config);
+
+  return names.flatMap((name) => {
+    const before = beforeLines.get(name);
+    const after = afterLines.get(name);
+    if (!before || !after || before === after) {
+      return [];
+    }
+
+    const action = targets.has(name) ? 'add' : 'remove';
+    const mode = action === 'add' ? targetModes[name] ?? 'auto' : 'auto';
+    const definition = before.slice(before.indexOf('=') + 1);
+    const tokens = splitPolicyGroupTokens(definition.slice(0, findInlineRequirementIndex(definition)));
+    const resolvedMode = resolvePolicyGroupTargetMode(tokens, mode);
+    return [{ name, action, mode, resolvedMode, before, after }];
+  });
+};
+
 const removeLegacyManagedProxyLines = ({ surgeText, outputDir }: { surgeText: string; outputDir: string }) => {
   const proxySectionPattern = /(\[Proxy\])([\s\S]*?)(?=\n\[|$)/;
   const normalizedOutputDir = outputDir.replace(/\\/g, '/');
@@ -486,25 +909,43 @@ const buildSurgeProfile = async ({
     outputDir: config.outputDir,
   });
 
-  return {
-    source,
-    updated: updatePolicyGroup({
+  const withSelectedTargets = updatePolicyGroupTargets({
+    surgeText: updatePolicyGroup({
       surgeText: withProxyBlock,
       policyGroupName: config.policyGroupName,
       nodeNames,
     }),
-  };
-};
+    policyGroupName: config.policyGroupName,
+    targetNames: configuredPolicyGroupTargets(config),
+    action: 'add',
+    targetModes: configuredPolicyGroupTargetModes(config),
+  });
 
-const writeSurgeProfile = async (params: { config: CliConfig; proxyLines: string[]; nodeNames: string[] }) => {
-  const { updated } = await buildSurgeProfile(params);
-  await writeTextFile(params.config.surgeConfigPath, updated);
-  return updated;
+  const updated = updatePolicyGroupTargets({
+    surgeText: withSelectedTargets,
+    policyGroupName: config.policyGroupName,
+    targetNames: configuredPolicyGroupExclusions(config),
+    action: 'remove',
+  });
+
+  return {
+    source,
+    updated,
+    policyGroupChanges: policyGroupChangePreview({ source, updated, config }),
+  };
 };
 
 const maybeReloadSurge = async (config: CliConfig, surgeText: string) => {
   if (!config.autoReload) {
     return;
+  }
+
+  const stopped = await stopManagedSingBoxProcesses({
+    singBoxBinary: config.singBoxBinary,
+    outputDir: config.outputDir,
+  });
+  if (stopped.length > 0) {
+    console.log(`Stopped ${stopped.length} managed sing-box process${stopped.length === 1 ? '' : 'es'} before reload.`);
   }
 
   const { reloaded, via } = await reloadSurgeProfile(surgeText);
@@ -534,6 +975,8 @@ const generateConfigsFromOutbounds = async ({
         node: {
           ...outbound,
           tag: nodeName,
+          ...(config.tcpFastOpen ? { tcp_fast_open: true } : {}),
+          ...(config.connectTimeoutEnabled ? { connect_timeout: `${config.connectTimeoutSeconds}s` } : {}),
         },
         port,
       });
@@ -560,6 +1003,9 @@ const generateConfigsFromOutbounds = async ({
         ...entry,
         singBoxBinary: config.singBoxBinary,
         addressResolver: config.addressResolver,
+        udpRelay: config.udpRelay,
+        udpTestEnabled: config.udpTestEnabled,
+        udpTestTarget: config.udpTestTarget,
       }),
     ),
   );
@@ -578,7 +1024,7 @@ const reportDryRun = async ({
   config: CliConfig;
   generated: { generated: StagedGeneratedNode[]; proxyLines: string[]; nodeNames: string[] };
 }) => {
-  const { source, updated } = await buildSurgeProfile({
+  const { source, updated, policyGroupChanges } = await buildSurgeProfile({
     config,
     proxyLines: generated.proxyLines,
     nodeNames: generated.nodeNames,
@@ -603,6 +1049,40 @@ const reportDryRun = async ({
       : `Surge profile would change: ${config.surgeConfigPath}`,
   );
   console.log(`Policy group: ${config.policyGroupName} = url-test, ${generated.nodeNames.join(', ')}`);
+  const policyGroupTargets = configuredPolicyGroupTargets(config);
+  const policyGroupExclusions = configuredPolicyGroupExclusions(config);
+  const policyGroupTargetModes = configuredPolicyGroupTargetModes(config);
+  if (policyGroupTargets.length > 0) {
+    console.log(`Add ${config.policyGroupName} to policy groups: ${policyGroupTargets.join(', ')}`);
+  }
+  if (policyGroupExclusions.length > 0) {
+    console.log(`Remove ${config.policyGroupName} from policy groups: ${policyGroupExclusions.join(', ')}`);
+  }
+
+  return {
+    count: generated.nodeNames.length,
+    added,
+    removed,
+    profileChanged: updated !== source,
+    policyGroupName: config.policyGroupName,
+    policyGroupTargets,
+    policyGroupExclusions,
+    policyGroupTargetModes,
+    policyGroupChanges,
+    udpRelay: config.udpRelay,
+    udpTestEnabled: config.udpTestEnabled,
+    udpTestTarget: config.udpTestTarget,
+    tcpFastOpen: config.tcpFastOpen,
+    connectTimeoutEnabled: config.connectTimeoutEnabled,
+    connectTimeoutSeconds: config.connectTimeoutSeconds,
+    surgeConfigPath: config.surgeConfigPath,
+    outputDir: config.outputDir,
+    nodes: generated.generated.map((entry) => ({
+      name: entry.nodeName,
+      port: entry.port,
+      server: entry.server,
+    })),
+  };
 };
 
 export const cleanManagedArtifacts = async (config: CliConfig) => {
@@ -622,15 +1102,21 @@ export const cleanManagedArtifacts = async (config: CliConfig) => {
     new RegExp(`^${escapeRegExp(config.policyGroupName)}\\s*=\\s*url-test,.*$\\n?`, 'm'),
     '',
   );
+  const withoutTargets = updatePolicyGroupTargets({
+    surgeText: withoutGroup,
+    policyGroupName: config.policyGroupName,
+    targetNames: [...new Set([...configuredPolicyGroupTargets(config), ...configuredPolicyGroupExclusions(config)])],
+    action: 'remove',
+  });
 
-  await writeTextFile(config.surgeConfigPath, withoutGroup);
+  await writeTextFile(config.surgeConfigPath, withoutTargets);
 
   const entries = (await readdir(config.outputDir).catch(() => [])).filter(
     (entry) => MANAGED_CONFIG_PATTERN.test(entry) || entry === MANIFEST_FILE_NAME,
   );
   await Promise.all(entries.map((entry) => rm(join(config.outputDir, entry), { force: true })));
 
-  await maybeReloadSurge(config, withoutGroup);
+  await maybeReloadSurge(config, withoutTargets);
 
   return {
     backupPath,
@@ -688,25 +1174,27 @@ export const syncSubscriptionToSurge = async (config: CliConfig, { dryRun = fals
     // The staging directory already holds validated configs, so a dry run can report exactly what a
     // real sync would produce without having written anything outside it.
     if (dryRun) {
-      await reportDryRun({ config, generated });
-      return { dryRun: true as const, backupPath: undefined, count: generated.nodeNames.length };
+      const preview = await reportDryRun({ config, generated });
+      return { dryRun: true as const, backupPath: undefined, count: generated.nodeNames.length, preview };
     }
 
-    const backupPath = await backupSurgeProfile(config);
-
-    await promoteGeneratedConfigs(config, generated.generated);
-    const surgeText = await writeSurgeProfile({
+    const surgeProfile = await buildSurgeProfile({
       config,
       proxyLines: generated.proxyLines,
       nodeNames: generated.nodeNames,
     });
+
+    const backupPath = await backupSurgeProfile(config);
+
+    await promoteGeneratedConfigs(config, generated.generated);
+    await writeTextFile(config.surgeConfigPath, surgeProfile.updated);
 
     const removedCount = await removeStaleConfigs(config.outputDir, generated.generated);
     if (removedCount > 0) {
       console.log(`Removed ${removedCount} node config${removedCount === 1 ? '' : 's'} no longer in the subscription.`);
     }
 
-    await maybeReloadSurge(config, surgeText);
+    await maybeReloadSurge(config, surgeProfile.updated);
 
     return {
       dryRun: false as const,
@@ -772,18 +1260,22 @@ export const rebuildSurgeFromLocalConfigs = async (config: CliConfig) => {
         ...entry,
         singBoxBinary: config.singBoxBinary,
         addressResolver: config.addressResolver,
+        udpRelay: config.udpRelay,
+        udpTestEnabled: config.udpTestEnabled,
+        udpTestTarget: config.udpTestTarget,
       }),
     ),
   );
 
-  const backupPath = await backupSurgeProfile(config);
-  const surgeText = await writeSurgeProfile({
+  const surgeProfile = await buildSurgeProfile({
     config,
     proxyLines,
     nodeNames: validEntries.map((entry) => entry.nodeName),
   });
+  const backupPath = await backupSurgeProfile(config);
+  await writeTextFile(config.surgeConfigPath, surgeProfile.updated);
 
-  await maybeReloadSurge(config, surgeText);
+  await maybeReloadSurge(config, surgeProfile.updated);
 
   return {
     backupPath,
@@ -904,10 +1396,12 @@ export const runDoctor = async (config: CliConfig) => {
     const httpApi = parseHttpApiSettings(text);
     checks.push({
       label: 'surge-http-api',
-      level: httpApi ? 'ok' : 'warn',
-      detail: httpApi
-        ? `${httpApi.origin} (profile reloads automatically)`
-        : 'not enabled; add `http-api = <key>@127.0.0.1:6171` to [General] to reload automatically',
+      level: !config.autoReload || httpApi ? 'ok' : 'warn',
+      detail: !config.autoReload
+        ? 'disabled by config; Surge profile reload is left to the user'
+        : httpApi
+          ? `${httpApi.origin} (profile reloads automatically)`
+          : 'not enabled; add `http-api = <key>@127.0.0.1:6171` to [General] to reload automatically',
     });
   }
 

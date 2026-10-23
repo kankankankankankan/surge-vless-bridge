@@ -30,6 +30,8 @@ export type SingBoxVlessOutbound = {
   uuid: string;
   flow?: string;
   packet_encoding?: 'xudp';
+  tcp_fast_open?: boolean;
+  connect_timeout?: string;
   tls?: SingBoxTls;
   transport?: SingBoxTransport;
   network?: string;

@@ -1,10 +1,169 @@
 # Changelog
 
+## [1.5.19] - 2026-10-24
+
+### Fixed
+
+- Stop only this application's managed sing-box processes before automatically reloading Surge, preventing stale processes from keeping local node ports occupied after a sync, rebuild, restore, or cleanup.
+
+## [1.5.18] - 2026-10-24
+
+### Fixed
+
+- Package desktop renderer assets from stable source paths so direct Electron Builder runs cannot produce a blank window.
+- Show a readable installation error when the renderer entry file cannot be loaded.
+- Apply a reproducible ad hoc signature to both macOS architecture builds.
+
+## [1.5.17] - 2026-10-23
+
+### Added
+
+- Add optional sing-box TCP Fast Open and custom remote connection timeout controls.
+- Add an optional Surge UDP connectivity test target for UDP-enabled external proxies.
+
+### Fixed
+
+- Keep update preview footer actions above the macOS Dock in short or scaled windows.
+
+## [1.5.16] - 2026-10-23
+
+### Added
+
+- Add an optional desktop and config switch for Surge External Policy UDP relay.
+- Keep `udp-relay=true` during subscription sync and local profile rebuilds when enabled.
+
+### Changed
+
+- Leave UDP relay disabled for existing configurations unless the user enables it.
+
+## [1.5.15] - 2026-10-23
+
+### Added
+
+- Show the installed sing-box version, latest stable release, installation source, and update state in desktop settings.
+- Validate every existing managed node config before replacing the managed binary and keep the previous version available for rollback.
+
+### Changed
+
+- Use `brew upgrade sing-box` for existing Homebrew installations and `brew install sing-box` for first-time installs.
+- Add a regression guard that keeps sing-box-only options out of Surge external policy lines.
+
+### Fixed
+
+- Parse the leading `v` in official GitHub release tags so update checks also show the latest version before sing-box is installed.
+
+## [1.5.14] - 2026-10-23
+
+### Fixed
+
+- Place the custom schedule interval on its own full-width row so the preset selector, value, unit, and help text remain aligned at the minimum window width.
+
+## [1.5.13] - 2026-10-23
+
+### Added
+
+- Add per-policy-group `auto`, `merge`, and `reference` membership modes.
+- Show complete policy group lines before and after each change in the update preview.
+
+### Changed
+
+- Automatically merge VLESS into groups that use `smart`, `include-other-group`, or `policy-regex-filter`.
+- Reject direct policy-group references in Surge smart groups before writing the profile.
+
+## [1.5.12] - 2026-10-23
+
+### Changed
+
+- Show policy groups that already contain VLESS as selected while keeping them editable.
+- Unchecking an included group removes VLESS during the next sync and preserves its other members and parameters.
+- Display included, pending addition, pending removal, and excluded states in the policy group list.
+
+## [1.5.11] - 2026-10-23
+
+### Fixed
+
+- Add VLESS to `smart` groups through `include-other-group`, matching Surge smart-group syntax.
+- Migrate invalid direct VLESS members and remove included references during managed cleanup.
+
+## [1.5.10] - 2026-10-23
+
+### Fixed
+
+- Keep the update preview within narrow or scaled windows so its close control, all metrics, local port column, and footer actions remain visible.
+- Truncate long profile paths and policy-group lists while preserving their full values in hover titles.
+
+## [1.5.9] - 2026-10-23
+
+### Changed
+
+- Add select-all, clear, and live selection counts to the policy-group checklist.
+- Refresh policy groups from the currently entered Surge profile path while preserving unsaved selections.
+- Replace workflow numbering and the generic app mark with task-specific icons.
+- Keep the settings save action visible while scrolling long forms.
+
+## [1.5.8] - 2026-10-23
+
+### Changed
+
+- Read policy groups from the selected Surge profile and display them as desktop checkboxes.
+- Mark groups that already contain VLESS while leaving their existing membership unchanged.
+- Hide the known Electron parent-process inspection warning from the displayed scheduler log while preserving sync output and other errors.
+
+## [1.5.7] - 2026-10-23
+
+### Added
+
+- Add the generated VLESS policy group to multiple existing Surge policy groups from desktop settings or configuration.
+- Show target policy groups in previews and remove managed references during cleanup.
+
+### Changed
+
+- Preserve target group types, members, parameters, and inline requirement comments while deduplicating VLESS references.
+- Reject missing target groups before changing the Surge profile or generated node files.
+
 [中文更新日志](./CHANGELOG.zh-CN.md)
 
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.5.6] - 2026-10-23
+
+### Changed
+
+- The sidebar now displays the installed application version.
+- The schedule view now states that macOS continues running enabled jobs after the app exits.
+
+## [1.5.5] - 2026-10-23
+
+### Added
+
+- Added manual history clearing and old-backup cleanup while preserving the latest backup.
+
+### Fixed
+
+- Reworked the app icon with a transparent canvas and macOS-style rounded silhouette for the Dock.
+
+## [1.5.4] - 2026-10-23
+
+### Added
+
+- Interval schedules accept any whole number from 1 to 168 hours while keeping the common presets.
+
+### Changed
+
+- The schedule view now uses a clearer next-run status row with consistent icon alignment and no
+  nested bordered surface.
+- Settings now call out that address resolution applies only to VLESS node server hostnames and does
+  not affect domains visited through the proxy.
+
+## [1.5.3] - 2026-10-23
+
+### Fixed
+
+- The macOS GUI now checks its managed install directory, `~/.local/bin`, `/opt/homebrew/bin`, and
+  `/usr/local/bin`, so a terminal-installed `sing-box` is found even when the GUI has no shell PATH.
+- When `sing-box` is missing, settings now show the same managed path used by the official installer.
 
 ## [1.5.1] - 2026-08-18
 

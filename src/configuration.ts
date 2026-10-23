@@ -1,8 +1,9 @@
-import { readdir, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, readdir, stat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 
-import type { AddressResolverConfig, CliConfig, CliConfigInput } from './types/cli-config';
+import type { AddressResolverConfig, CliConfig, CliConfigInput, PolicyGroupTargetMode } from './types/cli-config';
 import { pathExists, readJsonFile, writeTextFile } from './utils/fs';
 
 export const CONFIG_FILE_NAME = '.surge-vless-bridge.json';
@@ -24,24 +25,51 @@ const DEFAULT_ADDRESS_RESOLVER: AddressResolverConfig = {
   filterSurgeFakeIp: true,
 };
 
-const detectSingBoxBinary = async () => {
-  const result = spawnSync('which', ['sing-box'], {
+const isExecutable = async (path: string) => {
+  try {
+    await access(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const detectSingBoxBinary = async ({
+  home = process.env.HOME ?? process.env.USERPROFILE ?? '.',
+  searchPath = process.env.PATH ?? '',
+}: {
+  home?: string;
+  searchPath?: string;
+} = {}) => {
+  const result = spawnSync('/usr/bin/which', ['sing-box'], {
     encoding: 'utf8',
+    env: { ...process.env, PATH: searchPath },
     stdio: ['ignore', 'pipe', 'ignore'],
   });
 
   if (result.status === 0) {
     const binaryPath = result.stdout.trim();
-    return {
-      path: binaryPath,
-      exists: Boolean(binaryPath),
-    };
+    if (binaryPath && (await isExecutable(binaryPath))) {
+      return { path: binaryPath, exists: true };
+    }
   }
 
-  const fallbackPath = '/opt/homebrew/bin/sing-box';
+  const managedPath = join(home, '.config', 'surge-vless-bridge', 'bin', 'sing-box');
+  const homebrewPaths =
+    process.arch === 'x64'
+      ? ['/usr/local/bin/sing-box', '/opt/homebrew/bin/sing-box']
+      : ['/opt/homebrew/bin/sing-box', '/usr/local/bin/sing-box'];
+  const candidates = [managedPath, join(home, '.local', 'bin', 'sing-box'), ...homebrewPaths];
+
+  for (const candidate of candidates) {
+    if (await isExecutable(candidate)) {
+      return { path: candidate, exists: true };
+    }
+  }
+
   return {
-    path: fallbackPath,
-    exists: await pathExists(fallbackPath),
+    path: managedPath,
+    exists: false,
   };
 };
 
@@ -98,11 +126,20 @@ export const getDefaultConfig = async (_cwd: string): Promise<CliConfig> => {
     outputDir: join(stateDir, 'nodes'),
     backupDir: join(stateDir, 'backups'),
     policyGroupName: 'VLESS',
+    policyGroupTargets: [],
+    policyGroupExclusions: [],
+    policyGroupTargetModes: {},
     proxyStartMarker: '# vless start',
     proxyEndMarker: '# vless end',
     portStart: 2081,
     backupKeep: 20,
     autoReload: true,
+    udpRelay: false,
+    udpTestEnabled: false,
+    udpTestTarget: 'apple.com@8.8.8.8',
+    tcpFastOpen: false,
+    connectTimeoutEnabled: false,
+    connectTimeoutSeconds: 10,
     subscriptionOutputPath: join(stateDir, 'vless_nodes.txt'),
     requestHeaders: { ...DEFAULT_HEADERS },
     addressResolver: { ...DEFAULT_ADDRESS_RESOLVER },
@@ -155,16 +192,67 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
   const normalizedVlessNodes = hasVlessNodes
     ? sanitizedInput.vlessNodes?.filter((node) => typeof node === 'string' && node.trim() !== '')
     : undefined;
+  const policyGroupName =
+    typeof sanitizedInput.policyGroupName === 'string' && sanitizedInput.policyGroupName.trim()
+      ? sanitizedInput.policyGroupName.trim()
+      : base.policyGroupName;
+  const policyGroupTargets = [
+    ...new Set(
+      (Array.isArray(sanitizedInput.policyGroupTargets) ? sanitizedInput.policyGroupTargets : base.policyGroupTargets)
+        .filter((name): name is string => typeof name === 'string')
+        .map((name) => name.trim())
+        .filter((name) => name && name !== policyGroupName),
+    ),
+  ];
+  const policyGroupExclusions = [
+    ...new Set(
+      (
+        Array.isArray(sanitizedInput.policyGroupExclusions)
+          ? sanitizedInput.policyGroupExclusions
+          : base.policyGroupExclusions
+      )
+        .filter((name): name is string => typeof name === 'string')
+        .map((name) => name.trim())
+        .filter((name) => name && name !== policyGroupName && !policyGroupTargets.includes(name)),
+    ),
+  ];
+  const rawPolicyGroupTargetModes =
+    sanitizedInput.policyGroupTargetModes &&
+    typeof sanitizedInput.policyGroupTargetModes === 'object' &&
+    !Array.isArray(sanitizedInput.policyGroupTargetModes)
+      ? sanitizedInput.policyGroupTargetModes
+      : base.policyGroupTargetModes;
+  const validPolicyGroupTargetModes = new Set<PolicyGroupTargetMode>(['auto', 'merge', 'reference']);
+  const policyGroupTargetModes = Object.fromEntries(
+    policyGroupTargets.map((name) => {
+      const mode = rawPolicyGroupTargetModes[name];
+      return [name, mode && validPolicyGroupTargetModes.has(mode) ? mode : 'auto'];
+    }),
+  ) as Record<string, PolicyGroupTargetMode>;
   const addressResolverInput =
     typeof sanitizedInput.addressResolver === 'string'
       ? { strategy: sanitizedInput.addressResolver }
       : sanitizedInput.addressResolver;
+  const connectTimeoutSeconds = Number(sanitizedInput.connectTimeoutSeconds);
+  const udpTestTarget =
+    typeof sanitizedInput.udpTestTarget === 'string' && sanitizedInput.udpTestTarget.trim()
+      ? sanitizedInput.udpTestTarget.trim()
+      : base.udpTestTarget;
 
   return {
     ...base,
     ...sanitizedInput,
     subscriptionUrls: normalizedSubscriptionUrls ?? base.subscriptionUrls,
     vlessNodes: normalizedVlessNodes ?? base.vlessNodes,
+    policyGroupName,
+    policyGroupTargets,
+    policyGroupExclusions,
+    policyGroupTargetModes,
+    udpTestTarget,
+    connectTimeoutSeconds:
+      Number.isFinite(connectTimeoutSeconds) && connectTimeoutSeconds > 0
+        ? connectTimeoutSeconds
+        : base.connectTimeoutSeconds,
     requestHeaders: {
       ...base.requestHeaders,
       ...(sanitizedInput.requestHeaders ?? {}),
@@ -236,7 +324,16 @@ export const writeExampleConfig = async ({
     vlessNodes: clean(values?.vlessNodes),
     surgeConfigPath: values?.surgeConfigPath?.trim() || defaults.surgeConfigPath,
     policyGroupName: defaults.policyGroupName,
+    policyGroupTargets: defaults.policyGroupTargets,
+    policyGroupExclusions: defaults.policyGroupExclusions,
+    policyGroupTargetModes: defaults.policyGroupTargetModes,
     portStart: defaults.portStart,
+    udpRelay: defaults.udpRelay,
+    udpTestEnabled: defaults.udpTestEnabled,
+    udpTestTarget: defaults.udpTestTarget,
+    tcpFastOpen: defaults.tcpFastOpen,
+    connectTimeoutEnabled: defaults.connectTimeoutEnabled,
+    connectTimeoutSeconds: defaults.connectTimeoutSeconds,
     addressResolver: { ...defaults.addressResolver },
   };
 

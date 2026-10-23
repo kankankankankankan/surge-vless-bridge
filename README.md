@@ -5,6 +5,8 @@
 
 [中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
 
+![Surge VLESS Bridge desktop app](./docs/images/surge-vless-bridge-desktop.png)
+
 **Surge Mac VLESS support, via sing-box.** A Node.js CLI that converts a VLESS subscription — including REALITY and XTLS Vision nodes — into Surge Mac `external` proxy entries backed by local `sing-box` configs.
 
 Surge Mac does not natively support the VLESS protocol. This tool bridges the gap: it fetches your subscription, generates a `sing-box` config per node, and keeps your Surge profile updated — so VLESS nodes work seamlessly through Surge's rules, policy groups, and dashboard.
@@ -14,6 +16,19 @@ Surge Mac does not natively support the VLESS protocol. This tool bridges the ga
 - [sing-box](https://github.com/SagerNet/sing-box) installed (`brew install sing-box`)
 - Surge Mac with a profile containing `[Proxy]` and `[Proxy Group]` sections
 
+## macOS desktop app
+
+The Electron desktop app manages subscriptions, previews profile changes, runs syncs, repairs the local
+environment, installs or updates sing-box, configures DNS resolution, restores backups, and creates a
+background macOS schedule.
+
+```bash
+npm install
+npm run desktop
+```
+
+See the [desktop app guide](./docs/desktop-app.zh-CN.md) for packaging, scheduling, and recovery details.
+
 ## Setting this up with an AI agent
 
 Nothing to install first. Paste this into Claude Code, Cursor, Codex or a similar agent and it handles
@@ -21,7 +36,7 @@ the whole setup — checking for and installing `sing-box` and the CLI, creating
 verifying:
 
 ```text
-Read https://github.com/chen86860/surge-vless-bridge/blob/master/docs/agent-setup.md
+Read https://github.com/kankankankankankan/surge-vless-bridge/blob/master/docs/agent-setup.md
 and set up surge-vless-bridge for me.
 ```
 
@@ -122,7 +137,16 @@ Created by `init`. Default path: `~/.config/surge-vless-bridge/config.json`.
   ],
   "surgeConfigPath": "/Users/you/Library/Application Support/Surge/Profiles/Config.conf",
   "policyGroupName": "VLESS",
+  "policyGroupTargets": ["Proxy", "Auto"],
+  "policyGroupExclusions": ["Hong Kong"],
+  "policyGroupTargetModes": { "Proxy": "reference", "Auto": "auto" },
   "portStart": 2081,
+  "udpRelay": false,
+  "udpTestEnabled": false,
+  "udpTestTarget": "apple.com@8.8.8.8",
+  "tcpFastOpen": false,
+  "connectTimeoutEnabled": false,
+  "connectTimeoutSeconds": 10,
   "addressResolver": {
     "strategy": "doh",
     "filterSurgeFakeIp": true,
@@ -152,14 +176,31 @@ subscription that returns no VLESS nodes is reported as a warning rather than fa
 
 | Field             | Default                                | Description                                            |
 | ----------------- | -------------------------------------- | ------------------------------------------------------ |
-| `policyGroupName` | `"VLESS"`                              | Surge policy group name to populate                    |
-| `portStart`       | `2081`                                 | Starting local port; each node uses the next available |
-| `singBoxBinary`   | auto-detected via `which sing-box`     | Path to the `sing-box` binary                          |
-| `outputDir`       | `~/.config/surge-vless-bridge/nodes`   | Where per-node sing-box configs are written            |
-| `backupDir`       | `~/.config/surge-vless-bridge/backups` | Where Surge profile backups are stored                 |
-| `backupKeep`      | `20`                                   | How many backups to keep; older ones are pruned        |
-| `autoReload`      | `true`                                 | Ask Surge to reload the profile after it changes       |
-| `addressResolver` | see below                              | How to resolve proxy server domains for `addresses=`   |
+| `policyGroupName`    | `"VLESS"`                              | Surge policy group name to populate                    |
+| `policyGroupTargets` | `[]`                                   | Existing groups that should include the VLESS group    |
+| `policyGroupExclusions` | `[]`                                | Existing groups that should remove the VLESS group     |
+| `policyGroupTargetModes` | `{}`                                | Per-target `auto`, `merge`, or `reference` behavior    |
+| `portStart`          | `2081`                                 | Starting local port; each node uses the next available |
+| `singBoxBinary`      | auto-detected via `which sing-box`     | Path to the `sing-box` binary                          |
+| `outputDir`          | `~/.config/surge-vless-bridge/nodes`   | Where per-node sing-box configs are written            |
+| `backupDir`          | `~/.config/surge-vless-bridge/backups` | Where Surge profile backups are stored                 |
+| `backupKeep`         | `20`                                   | How many backups to keep; older ones are pruned        |
+| `autoReload`         | `true`                                 | Ask Surge to reload the profile after it changes       |
+| `udpRelay`           | `false`                                | Add `udp-relay=true` to generated external proxies     |
+| `udpTestEnabled`     | `false`                                | Add `test-udp` to UDP-enabled external proxies         |
+| `udpTestTarget`      | `"apple.com@8.8.8.8"`                | Hostname and IPv4 address used by Surge UDP tests      |
+| `tcpFastOpen`        | `false`                                | Enable TCP Fast Open for sing-box remote connections   |
+| `connectTimeoutEnabled` | `false`                             | Use a custom remote connection timeout                 |
+| `connectTimeoutSeconds` | `10`                               | Remote connection timeout in seconds                   |
+| `addressResolver`    | see below                              | How to resolve proxy server domains for `addresses=`   |
+
+Enable `udpRelay` when VLESS should carry UDP traffic used by games, QUIC, voice calls, or UDP DNS.
+The generated sing-box SOCKS inbound accepts UDP ASSOCIATE. Leave it disabled when the upstream node
+does not support UDP or when only TCP traffic is needed.
+
+When `udpTestEnabled` is enabled, external proxy entries include `test-udp=hostname@IPv4`. It requires `udpRelay`; the default target is `apple.com@8.8.8.8`.
+
+`tcpFastOpen` and the custom connection timeout are sing-box dial fields. They emit `tcp_fast_open=true` and `connect_timeout=Ns` in each generated outbound and are not written as Surge parameters.
 
 `addressResolver.strategy` can be:
 
@@ -223,10 +264,24 @@ http-api = your-key@127.0.0.1:6171
 `surge-cli reload` is used as a fallback when it is available. Pass `--no-reload`, or set
 `"autoReload": false`, to opt out. `doctor` reports which of these is in use.
 
+Before an automatic reload, the bridge stops only sing-box processes whose command contains both the
+configured binary path and a managed `outputDir/sing-box[PORT].json` path. This releases stale local
+ports while leaving unrelated sing-box instances untouched.
+
 ### Removing everything
 
-`clean` deletes the generated node configs and removes the managed block and policy group from the
-Surge profile, leaving the rest of the profile untouched. The profile is backed up first.
+`policyGroupTargets` accepts existing Surge policy group names. `policyGroupTargetModes` controls how
+each selected group receives VLESS. `auto` uses `merge` for `smart` groups and groups that already use
+`include-other-group` or `policy-regex-filter`; other groups use `reference`. `merge` appends VLESS to
+`include-other-group`, while `reference` adds VLESS as a direct group member. Surge does not allow a
+`smart` group to reference another policy group directly, so `reference` is rejected for that case.
+
+`policyGroupExclusions` removes VLESS from explicitly unchecked groups while preserving their other
+members and parameters. The update preview shows the complete group line before and after each change.
+Missing addition targets are rejected before the profile is written.
+
+`clean` deletes the generated node configs, removes the managed block and policy group, and removes
+the managed group from configured targets. The profile is backed up first.
 
 ```bash
 surge-vless-bridge clean
@@ -239,7 +294,7 @@ surge-vless-bridge clean
 For contributors working on the source code.
 
 ```bash
-git clone https://github.com/chen86860/surge-vless-bridge.git
+git clone https://github.com/kankankankankankan/surge-vless-bridge.git
 cd surge-vless-bridge
 npm install
 ```
@@ -258,3 +313,9 @@ Build compiled output to `dist/`:
 ```bash
 npm run build
 ```
+
+## Acknowledgements
+
+This project builds on the original [surge-vless-bridge](https://github.com/chen86860/surge-vless-bridge)
+created by [chen86860](https://github.com/chen86860). The original author and copyright notice remain
+in `package.json` and `LICENSE`.

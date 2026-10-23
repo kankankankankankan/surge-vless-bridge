@@ -4,6 +4,9 @@ node_modules
 # output
 out
 dist
+release
+.build
+backup
 *.tgz
 
 # code coverage
@@ -36,3 +39,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # local CLI config and generated state
 .surge-vless-bridge.json
 .surge-vless-bridge/
+
+# local Swift prototype
+Package.swift
+Sources/

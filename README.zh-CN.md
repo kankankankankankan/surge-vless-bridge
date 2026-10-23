@@ -5,6 +5,8 @@
 
 [English README](./README.md) · [更新日志](./CHANGELOG.zh-CN.md)
 
+![Surge VLESS Bridge 桌面应用](./docs/images/surge-vless-bridge-desktop.png)
+
 **让 Surge Mac 支持 VLESS，底层由 sing-box 承接。** 基于 Node.js 的 CLI，把 VLESS 订阅（含 REALITY、XTLS Vision 节点）转换为 Surge Mac 可用的 `external` 外部代理节点。
 
 Surge Mac 不原生支持 VLESS 协议。该工具自动拉取订阅、为每个节点生成 `sing-box` 配置、并保持 Surge 配置同步更新，让你继续使用 Surge 的规则、策略组和面板来使用 VLESS 节点。
@@ -14,13 +16,31 @@ Surge Mac 不原生支持 VLESS 协议。该工具自动拉取订阅、为每个
 - 已安装 [sing-box](https://github.com/SagerNet/sing-box)（`brew install sing-box`）
 - Surge Mac 配置文件中包含 `[Proxy]` 和 `[Proxy Group]` 区块
 
+## macOS 桌面应用
+
+仓库包含 Electron 桌面界面，可以管理订阅、预览更新、执行同步、检查并修复环境、安装 `sing-box`、配置 DNS、恢复备份和管理 macOS 定时任务。
+
+```bash
+npm install
+npm run desktop
+```
+
+生成本地 `.app`：
+
+```bash
+npm run desktop:icon
+npm run desktop:package
+```
+
+详细操作和恢复方法见 [macOS 桌面应用指南](./docs/desktop-app.zh-CN.md)。
+
 ## 让 AI Agent 帮你完成配置
 
 把下面这段话丢给 Claude Code、Cursor、Codex 之类的 agent，检测并安装 `sing-box`
 和 CLI、生成配置、同步、验证，整套流程它都能完成：
 
 ```text
-阅读 https://github.com/chen86860/surge-vless-bridge/blob/master/docs/agent-setup.md
+阅读 https://github.com/kankankankankankan/surge-vless-bridge/blob/master/docs/agent-setup.md
 然后帮我配置好 surge-vless-bridge
 ```
 
@@ -114,7 +134,16 @@ surge-vless-bridge doctor
   ],
   "surgeConfigPath": "/Users/you/Library/Application Support/Surge/Profiles/Config.conf",
   "policyGroupName": "VLESS",
+  "policyGroupTargets": ["代理", "自动选择"],
+  "policyGroupExclusions": ["香港线路"],
+  "policyGroupTargetModes": { "代理": "reference", "自动选择": "auto" },
   "portStart": 2081,
+  "udpRelay": false,
+  "udpTestEnabled": false,
+  "udpTestTarget": "apple.com@8.8.8.8",
+  "tcpFastOpen": false,
+  "connectTimeoutEnabled": false,
+  "connectTimeoutSeconds": 10,
   "addressResolver": {
     "strategy": "doh",
     "filterSurgeFakeIp": true,
@@ -143,14 +172,30 @@ surge-vless-bridge doctor
 
 | 字段              | 默认值                                 | 说明                                 |
 | ----------------- | -------------------------------------- | ------------------------------------ |
-| `policyGroupName` | `"VLESS"`                              | 要写入的 Surge 策略组名称            |
-| `portStart`       | `2081`                                 | 起始本地端口，每个节点依次递增       |
-| `singBoxBinary`   | 自动检测（`which sing-box`）           | `sing-box` 可执行文件路径            |
-| `outputDir`       | `~/.config/surge-vless-bridge/nodes`   | 每个节点的 sing-box 配置保存目录     |
-| `backupDir`       | `~/.config/surge-vless-bridge/backups` | Surge 配置备份目录                   |
-| `backupKeep`      | `20`                                   | 保留的备份数量，超出的旧备份自动清理 |
-| `autoReload`      | `true`                                 | 配置变更后自动让 Surge 重载          |
-| `addressResolver` | 见下方                                 | 为 `addresses=` 解析代理服务器域名   |
+| `policyGroupName`    | `"VLESS"`                              | 要写入的 Surge 策略组名称             |
+| `policyGroupTargets` | `[]`                                   | 需要加入 VLESS 组的已有策略组列表     |
+| `policyGroupExclusions` | `[]`                                | 需要移除 VLESS 组的已有策略组列表     |
+| `policyGroupTargetModes` | `{}`                                | 每个目标组的接入方式                   |
+| `portStart`          | `2081`                                 | 起始本地端口，每个节点依次递增        |
+| `singBoxBinary`      | 自动检测（`which sing-box`）           | `sing-box` 可执行文件路径             |
+| `outputDir`          | `~/.config/surge-vless-bridge/nodes`   | 每个节点的 sing-box 配置保存目录      |
+| `backupDir`          | `~/.config/surge-vless-bridge/backups` | Surge 配置备份目录                    |
+| `backupKeep`         | `20`                                   | 保留的备份数量，超出的旧备份自动清理  |
+| `autoReload`         | `true`                                 | 配置变更后自动让 Surge 重载           |
+| `udpRelay`           | `false`                                | 为 external 节点写入 `udp-relay=true` |
+| `udpTestEnabled`     | `false`                                | 为启用 UDP 的节点写入 `test-udp`      |
+| `udpTestTarget`      | `"apple.com@8.8.8.8"`                | Surge UDP 测试使用的域名和 IPv4       |
+| `tcpFastOpen`        | `false`                                | 为 sing-box 远程连接开启 TCP Fast Open |
+| `connectTimeoutEnabled` | `false`                             | 使用自定义远程连接超时                 |
+| `connectTimeoutSeconds` | `10`                               | 远程连接超时秒数                       |
+| `addressResolver`    | 见下方                                 | 为 `addresses=` 解析节点服务器域名    |
+
+游戏、QUIC、语音通话或 UDP DNS 需要经过 VLESS 时，可以开启 `udpRelay`。生成的 sing-box SOCKS 入站支持
+UDP ASSOCIATE。上游节点不支持 UDP，或只需要 TCP 流量时保持关闭。
+
+开启 `udpTestEnabled` 后，Surge external 节点会增加 `test-udp=域名@IPv4`。该项依赖 `udpRelay`，默认测试目标为 `apple.com@8.8.8.8`。
+
+`tcpFastOpen` 和连接超时属于 sing-box 远程拨号参数。开启后会分别写入 `tcp_fast_open=true` 和 `connect_timeout=秒数s`，不会写入 Surge 参数。
 
 `addressResolver.strategy` 可选：
 
@@ -168,6 +213,8 @@ Surge 的 `addresses=` 只接受单个地址。当一个域名解析出多个结
 才会写 IPv6。
 
 `addressResolver.filterSurgeFakeIp` 默认为 `true`。它会在写入 `addresses=` 前过滤 `198.18.0.0/15` 地址，避免把 Surge fake-ip 结果固定到 external proxy 条目里。
+
+这里解析的是 VLESS 节点的服务器域名。解析只在同步生成 Surge external 节点时执行，不处理节点显示名称，也不影响经代理访问的网站域名。
 
 ### 为什么默认使用 `doh`
 
@@ -212,9 +259,21 @@ http-api = your-key@127.0.0.1:6171
 未开启时会尝试使用 `surge-cli reload` 兜底。加 `--no-reload` 或设置 `"autoReload": false` 可以关闭该行为，
 `doctor` 会显示当前使用的是哪种方式。
 
+自动重载前，应用只会停止命令行中同时匹配当前 `singBoxBinary` 和
+`outputDir/sing-box[端口].json` 的 sing-box 进程，释放旧节点占用的本地端口，不影响其他 sing-box 实例。
+
 ### 彻底移除
 
-`clean` 会删除生成的节点配置，并从 Surge 配置中移除托管区块和对应策略组，其余内容保持不变。执行前会先备份。
+`policyGroupTargets` 可填写多个已有 Surge 策略组。`policyGroupTargetModes` 可为每个组指定 `auto`、
+`merge` 或 `reference`。`auto` 遇到 `smart`、`include-other-group` 或 `policy-regex-filter` 时采用
+`merge`，其余组采用 `reference`。`merge` 会把 VLESS 合并进 `include-other-group`，`reference`
+会把 VLESS 作为直接成员加入。Surge 不允许 `smart` 直接引用其他策略组，因此该组合会被拒绝。
+
+`policyGroupExclusions` 会在同步时从指定组移除 `policyGroupName`。加入和移除都会保留策略组的其他成员和参数。
+更新预览会显示每个策略组修改前后的完整配置行。
+目标组缺失时会在写入前停止，并列出缺失名称。
+
+`clean` 会删除生成的节点配置、托管区块和对应策略组，同时从已配置的目标组中移除该组。执行前会先备份。
 
 ```bash
 surge-vless-bridge clean
@@ -227,7 +286,7 @@ surge-vless-bridge clean
 面向参与贡献的开发者。
 
 ```bash
-git clone https://github.com/chen86860/surge-vless-bridge.git
+git clone https://github.com/kankankankankan/surge-vless-bridge.git
 cd surge-vless-bridge
 npm install
 ```
@@ -246,3 +305,9 @@ npm run doctor       # tsx src/cli.ts doctor
 ```bash
 npm run build
 ```
+
+## 感谢
+
+本项目基于 [chen86860](https://github.com/chen86860) 创建的原版
+[surge-vless-bridge](https://github.com/chen86860/surge-vless-bridge) 继续扩展。
+`package.json` 中的原作者信息和 `LICENSE` 中的原版权声明均予以保留。

@@ -8,7 +8,18 @@
   ],
   "surgeConfigPath": "/Users/you/Library/Application Support/Surge/Profiles/Config.conf",
   "policyGroupName": "VLESS",
+  "policyGroupTargets": [],
+  "policyGroupExclusions": [],
+  "policyGroupTargetModes": {
+    "HUB": "auto"
+  },
   "portStart": 2081,
+  "udpRelay": false,
+  "udpTestEnabled": false,
+  "udpTestTarget": "apple.com@8.8.8.8",
+  "tcpFastOpen": false,
+  "connectTimeoutEnabled": false,
+  "connectTimeoutSeconds": 10,
   "addressResolver": {
     "strategy": "doh",
     "filterSurgeFakeIp": true,
