@@ -10,6 +10,7 @@
 ### 新增
 
 - GitHub Actions 使用原生 Intel x86_64 和 Apple 芯片 arm64 runner 构建并验证 DMG，同时上传各架构安装包和 SHA256 校验文件。
+- 与版本号一致的标签构建成功后，自动把双架构 DMG 和校验文件发布到 GitHub Releases。
 - 新增 Mihomo 网关模式，使用单个后台进程和每节点回环 SOCKS5 listener。
 - 设置页增加运行引擎切换、Mihomo 安装更新回退、LaunchAgent 状态和控制入口。
 - 环境诊断和修复操作按当前运行引擎分流。

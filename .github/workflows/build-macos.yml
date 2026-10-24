@@ -102,3 +102,53 @@ jobs:
             ${{ steps.artifact.outputs.dmg }}.sha256
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Validate release tag
+        id: version
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          expected_tag="v${version}"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package version $version." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download verified DMGs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: surge-vless-bridge-${{ steps.version.outputs.version }}-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mapfile -t assets < <(find release-artifacts -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.sha256' \) -print | sort)
+          if [[ "${#assets[@]}" -ne 4 ]]; then
+            echo "Expected two DMGs and two checksum files, found ${#assets[@]}." >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --title "Surge VLESS Bridge $GITHUB_REF_NAME" \
+              --generate-notes
+          fi

@@ -5,6 +5,7 @@
 ### Added
 
 - Build and verify native Intel x86_64 and Apple Silicon arm64 DMGs with GitHub Actions, then upload each architecture with its SHA256 checksum.
+- Publish verified dual-architecture DMGs and checksums to GitHub Releases after a matching version tag build succeeds.
 - Add a Mihomo gateway runtime backed by one background process and one loopback SOCKS5 listener per node.
 - Add runtime selection, Mihomo install/update/rollback, and LaunchAgent controls to desktop settings.
 - Route environment diagnostics and repair actions through the selected runtime.

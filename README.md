@@ -32,6 +32,7 @@ See the [desktop app guide](./docs/desktop-app.zh-CN.md) for packaging, scheduli
 
 GitHub Actions builds both macOS architectures on native runners. Download `x64` for Intel Macs and
 `arm64` for Apple Silicon from the workflow run's Artifacts section.
+Pushing a version tag such as `v1.6.0` automatically publishes both verified DMGs and their SHA-256 files to GitHub Releases.
 
 ## Setting this up with an AI agent
 

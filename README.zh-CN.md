@@ -37,6 +37,7 @@ npm run desktop:package
 
 GitHub Actions 会在原生 Intel 和 Apple 芯片 runner 上分别构建。Intel Mac 下载 `x64`，M 系列 Mac 下载
 `arm64`，成品位于对应工作流运行记录的 Artifacts 区域。
+推送 `v1.6.0` 这类版本标签后，验证通过的两个 DMG 和 SHA-256 文件会自动发布到 GitHub Releases。
 
 ## 让 AI Agent 帮你完成配置
 

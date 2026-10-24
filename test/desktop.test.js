@@ -409,6 +409,17 @@ test('desktop package collects renderer assets from stable source paths', async 
   assert.match(entitlements, /com\.apple\.security\.cs\.disable-library-validation/);
 });
 
+test('macOS workflow publishes verified version-tag builds to GitHub Releases', async () => {
+  const workflow = await readFile(path.join(__dirname, '..', '.github', 'workflows', 'build-macos.yml'), 'utf8');
+  assert.match(workflow, /release:\n    name: Publish GitHub Release/);
+  assert.match(workflow, /if: startsWith\(github\.ref, 'refs\/tags\/v'\)/);
+  assert.match(workflow, /needs: build/);
+  assert.match(workflow, /expected_tag="v\$\{version\}"/);
+  assert.match(workflow, /actions\/download-artifact@v7/);
+  assert.match(workflow, /gh release create/);
+  assert.match(workflow, /gh release upload/);
+});
+
 test('desktop custom interval uses a full-width second row', async () => {
   const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
   const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');
