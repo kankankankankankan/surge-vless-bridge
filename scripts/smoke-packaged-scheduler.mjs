@@ -33,6 +33,8 @@ try {
     configPath,
     `${JSON.stringify(
       {
+        runtimeMode: 'external',
+        runtimeModeConfirmed: true,
         subscriptionUrls: [],
         vlessNodes: [
           'vless://00000000-0000-4000-8000-000000000001@example.com:443?encryption=none#Scheduled%20Smoke',

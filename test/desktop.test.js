@@ -384,6 +384,7 @@ test('desktop policy group controls expose bulk selection and task-specific work
 test('desktop package collects renderer assets from stable source paths', async () => {
   const packageJson = JSON.parse(await readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
   const main = await readFile(path.join(__dirname, '..', 'src', 'desktop', 'main.ts'), 'utf8');
+  const packagedSmoke = await readFile(path.join(__dirname, '..', 'scripts', 'smoke-packaged-scheduler.mjs'), 'utf8');
   const entitlements = await readFile(path.join(__dirname, '..', 'desktop', 'entitlements.mac.plist'), 'utf8');
   const resources = packageJson.build.extraResources;
 
@@ -398,6 +399,8 @@ test('desktop package collects renderer assets from stable source paths', async 
   });
   assert.match(main, /process\.resourcesPath, 'renderer', 'index\.html'/);
   assert.match(main, /界面资源加载失败/);
+  assert.match(packagedSmoke, /runtimeMode: 'external'/);
+  assert.match(packagedSmoke, /runtimeModeConfirmed: true/);
   assert.equal(packageJson.build.mac.identity, '-');
   assert.equal(packageJson.build.mac.entitlements, 'desktop/entitlements.mac.plist');
   assert.equal(packageJson.build.mac.entitlementsInherit, 'desktop/entitlements.mac.plist');
