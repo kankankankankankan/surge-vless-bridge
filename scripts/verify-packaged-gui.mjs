@@ -12,6 +12,7 @@ const requiredFiles = [
   ['renderer/index.html', 'id="view-overview"'],
   ['renderer/styles.css', '.app-shell'],
   ['renderer/app.js', 'window.surgeBridge'],
+  ['renderer/boot.js', '读取配置超时，请重试'],
   ['renderer/vendor/lucide.js', 'lucide'],
 ];
 

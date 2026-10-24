@@ -1,5 +1,16 @@
 export type AddressResolverStrategy = 'system' | 'doh' | 'dns' | 'off';
 export type PolicyGroupTargetMode = 'auto' | 'merge' | 'reference';
+export type RuntimeMode = 'external' | 'mihomo';
+
+export type MihomoConfig = {
+  binary: string;
+  dataDir: string;
+  controllerHost: string;
+  controllerPort: number;
+  controllerSecret: string;
+  autoStart: boolean;
+  logLevel: 'silent' | 'error' | 'warning' | 'info' | 'debug';
+};
 
 export type AddressResolverConfig = {
   strategy: AddressResolverStrategy;
@@ -9,8 +20,12 @@ export type AddressResolverConfig = {
 };
 
 export type CliConfig = {
+  runtimeMode: RuntimeMode;
+  runtimeModeConfirmed: boolean;
+  mihomo: MihomoConfig;
   subscriptionUrl?: string;
   subscriptionUrls?: string[];
+  subscriptionNames?: string[];
   vlessNodes?: string[];
   surgeConfigPath: string;
   singBoxBinary: string;
@@ -36,6 +51,7 @@ export type CliConfig = {
   addressResolver: AddressResolverConfig;
 };
 
-export type CliConfigInput = Partial<Omit<CliConfig, 'addressResolver'>> & {
+export type CliConfigInput = Partial<Omit<CliConfig, 'addressResolver' | 'mihomo'>> & {
   addressResolver?: AddressResolverStrategy | Partial<AddressResolverConfig>;
+  mihomo?: Partial<MihomoConfig>;
 };

@@ -5,10 +5,25 @@
 ### Added
 
 - Build and verify native Intel x86_64 and Apple Silicon arm64 DMGs with GitHub Actions, then upload each architecture with its SHA256 checksum.
+- Add a Mihomo gateway runtime backed by one background process and one loopback SOCKS5 listener per node.
+- Add runtime selection, Mihomo install/update/rollback, and LaunchAgent controls to desktop settings.
+- Route environment diagnostics and repair actions through the selected runtime.
+- Persist the local Mihomo controller secret once with private file permissions.
+- Keep shared generation settings visible in both runtimes and scope DNS resolution plus custom connection timeout to External.
+- Remove the ignored Mihomo VLESS `connect-timeout` key after validation against official v1.19.33 source and binary.
+- Route CLI, desktop, and scheduled sync operations through the configured runtime.
+- Require an explicit runtime choice on first launch and provide an in-app runtime switch later.
+- Show download, verification, extraction, installation, and validation progress for managed core installs.
+- Support custom subscription names and custom hourly schedule intervals.
+- Add recoverable startup loading with a timeout and a visible retry action.
 
 ### Fixed
 
 - Require a manual workflow run and the `npm-publish` environment before publishing to npm, preventing fork pushes from creating failed publish runs.
+- Keep the desktop loading screen from spinning forever when initial state loading fails or stalls.
+- Keep the top-bar preview and sync labels and icons vertically centered.
+- Improve narrow-window, schedule, Mihomo settings, preview, and installation-progress layouts.
+- Continue processing usable subscriptions when another source is empty or fails, without exposing private URLs.
 
 ## [1.5.19] - 2026-10-24
 

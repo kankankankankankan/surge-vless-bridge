@@ -36,6 +36,7 @@ const makeConfig = async (label) => {
     root,
     config: {
       ...defaults,
+      runtimeModeConfirmed: true,
       subscriptionUrl: '',
       subscriptionUrls: [],
       vlessNodes: [],

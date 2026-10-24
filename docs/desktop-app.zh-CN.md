@@ -119,7 +119,7 @@ Homebrew 来源保持由 Homebrew 管理：首次安装执行 `brew install sing
 
 「UDP 连通性测试」开启后写入 `test-udp=域名@IPv4`，并且要求 UDP 转发同时开启。默认目标为 `apple.com@8.8.8.8`，可在设置中修改。
 
-「远程 TCP Fast Open」和「自定义连接超时」写入 sing-box outbound 的 `tcp_fast_open` 与 `connect_timeout`。Surge external 行不会加入 `tfo`，避免把本地 SOCKS 连接参数和远程 VLESS 连接参数混在一起。
+「远程 TCP Fast Open」在 External 和 Mihomo 中均可用。「自定义连接超时」仅用于 External，会写入 sing-box outbound 的 `connect_timeout`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，界面在 Mihomo 模式下会隐藏该选项。
 
 `test-url` 仍由 Surge 策略组和用户配置决定，本工具不自动覆盖。
 

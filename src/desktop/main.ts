@@ -3,10 +3,13 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import type { RuntimeMode } from '../types/cli-config';
 import { DesktopService } from './service';
 import type {
   DesktopAction,
   DesktopConfigView,
+  MihomoInstallMethod,
+  MihomoServiceAction,
   RepairableCheck,
   ScheduleSettings,
   SingBoxInstallMethod,
@@ -60,7 +63,7 @@ const createWindow = () => {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
-    minWidth: 980,
+    minWidth: 720,
     minHeight: 680,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },
@@ -89,8 +92,10 @@ const registerIpc = () => {
     'desktop:inspect-policy-groups',
     (_event, input: { surgeConfigPath: string; policyGroupName: string }) => service.inspectPolicyGroups(input),
   );
-  ipcMain.handle('desktop:save-sources', (_event, input: { subscriptionUrls: string[]; vlessNodes: string[] }) =>
-    service.saveSources(input),
+  ipcMain.handle(
+    'desktop:save-sources',
+    (_event, input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) =>
+      service.saveSources(input),
   );
   ipcMain.handle('desktop:save-settings', (_event, input: DesktopConfigView) => service.saveSettings(input));
   ipcMain.handle('desktop:run-action', (_event, action: DesktopAction) => service.runAction(action));
@@ -98,13 +103,23 @@ const registerIpc = () => {
   ipcMain.handle('desktop:install-sing-box', (_event, method: SingBoxInstallMethod) => service.installSingBox(method));
   ipcMain.handle('desktop:check-sing-box-update', () => service.checkSingBoxUpdate());
   ipcMain.handle('desktop:rollback-sing-box', () => service.rollbackSingBox());
+  ipcMain.handle('desktop:install-mihomo', (_event, method: MihomoInstallMethod) => service.installMihomo(method));
+  ipcMain.handle('desktop:check-mihomo-update', () => service.checkMihomoUpdate());
+  ipcMain.handle('desktop:rollback-mihomo', () => service.rollbackMihomo());
+  ipcMain.handle('desktop:control-mihomo', (_event, action: MihomoServiceAction) => service.controlMihomo(action));
+  ipcMain.handle('desktop:switch-engine', (_event, targetMode: RuntimeMode) => service.switchEngine(targetMode));
   ipcMain.handle('desktop:save-schedule', (_event, input: ScheduleSettings) => service.saveSchedule(input));
   ipcMain.handle('desktop:disable-schedule', () => service.disableSchedule());
   ipcMain.handle('desktop:clear-history', () => service.clearHistory());
   ipcMain.handle('desktop:clean-old-backups', () => service.cleanOldBackups());
-  ipcMain.handle('desktop:choose-file', async (_event, kind: 'surge-profile' | 'sing-box') => {
+  ipcMain.handle('desktop:choose-file', async (_event, kind: 'surge-profile' | 'sing-box' | 'mihomo') => {
     const result = await dialog.showOpenDialog(mainWindow!, {
-      title: kind === 'surge-profile' ? '选择 Surge 配置文件' : '选择 sing-box 可执行文件',
+      title:
+        kind === 'surge-profile'
+          ? '选择 Surge 配置文件'
+          : kind === 'mihomo'
+            ? '选择 Mihomo 可执行文件'
+            : '选择 sing-box 可执行文件',
       defaultPath:
         kind === 'surge-profile'
           ? join(homedir(), 'Library', 'Application Support', 'Surge', 'Profiles')
@@ -159,6 +174,7 @@ void app.whenReady().then(() => {
   service = new DesktopService({
     executablePath: process.execPath,
     scheduledEntryPath: scheduledEntryPath(),
+    onInstallProgress: (progress) => mainWindow?.webContents.send('desktop:install-progress', progress),
   });
   registerIpc();
   installMenu();

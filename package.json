@@ -1,7 +1,7 @@
 {
   "name": "surge-vless-bridge",
-  "version": "1.5.19",
-  "description": "Surge Mac VLESS support via sing-box: a Node.js CLI that converts VLESS subscriptions (including REALITY / XTLS Vision nodes) into Surge external proxy entries and policy groups.",
+  "version": "1.6.0",
+  "description": "Surge Mac VLESS support with selectable sing-box External and Mihomo gateway runtimes.",
   "license": "MIT",
   "author": "chen86860",
   "keywords": [
@@ -59,7 +59,8 @@
     "asar": true,
     "asarUnpack": [
       "dist/**/*.js",
-      "dist/**/*.map"
+      "dist/**/*.map",
+      "node_modules/yaml/**/*"
     ],
     "files": [
       "dist/**/*",
@@ -72,7 +73,8 @@
         "filter": [
           "index.html",
           "styles.css",
-          "app.js"
+          "app.js",
+          "boot.js"
         ]
       },
       {
@@ -118,5 +120,8 @@
     "sharp": "^0.35.5",
     "tsx": "^4.20.5",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

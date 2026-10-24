@@ -1,4 +1,5 @@
 const api = window.surgeBridge;
+const STARTUP_TIMEOUT_MS = 12000;
 
 const pageMeta = {
   overview: ['概览', '从节点来源到自动同步的完整流程'],
@@ -12,10 +13,17 @@ const labelMap = {
   nodeSources: '节点来源',
   surgeConfigPath: 'Surge 配置',
   singBoxBinary: 'sing-box',
+  mihomoBinary: 'Mihomo',
+  'mihomo-data-dir': 'Mihomo 数据目录',
+  'mihomo-config': 'Mihomo 配置',
+  'mihomo-launch-agent': 'Mihomo 后台服务',
+  'mihomo-controller': 'Mihomo Controller',
+  'mihomo-listeners': 'Mihomo Listeners',
   outputDir: '节点目录',
   backupDir: '备份目录',
   'proxy-group-section': '策略组区块',
   'proxy-section': '代理区块',
+  'rule-section': '规则区块',
   'surge-http-api': 'Surge 重载',
   ports: '本地端口',
 };
@@ -32,6 +40,12 @@ const actionMap = {
   'install-sing-box': '安装 sing-box',
   'update-sing-box': '更新 sing-box',
   'rollback-sing-box': '回退 sing-box',
+  'install-mihomo': '安装 Mihomo',
+  'update-mihomo': '更新 Mihomo',
+  'rollback-mihomo': '回退 Mihomo',
+  'start-mihomo': '启动 Mihomo',
+  'stop-mihomo': '停止 Mihomo',
+  'switch-engine': '切换引擎',
 };
 
 let state;
@@ -41,10 +55,16 @@ let selectedHistoryId;
 let toastTimer;
 let previewPlan;
 let nextAction = 'preview';
-let sourceDraft = { subscriptionUrls: [], vlessNodes: [] };
+let sourceDraft = { subscriptionUrls: [], subscriptionNames: [], vlessNodes: [] };
 let secretsVisible = false;
 let sourcesDirty = false;
 let singBoxUpdateChecked = false;
+let mihomoUpdateChecked = false;
+let engineDraftMode = 'external';
+let onboardingDraftMode;
+let engineOnboardingVisible = false;
+const installProgressByTarget = new Map();
+let installIndicatorTimer;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -78,15 +98,142 @@ const showToast = (message, isError = false) => {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3600);
 };
 
-const setBusy = (value, text = '正在处理') => {
+const setBusy = (value, text = '正在处理', showCover = true) => {
   busy = value;
   const cover = $('#loading-cover');
+  cover.classList.remove('failed');
+  cover.querySelector('.spinner').classList.remove('hidden');
+  $('#reload-app').classList.add('hidden');
   cover.querySelector('span').textContent = text;
-  cover.classList.toggle('hidden', !value);
+  cover.classList.toggle('hidden', !value || !showCover);
   $$('button').forEach((button) => {
-    if (!button.classList.contains('nav-item')) button.disabled = value;
+    if (!button.classList.contains('nav-item') && button.id !== 'install-task-indicator') button.disabled = value;
   });
-  if (!value && state?.environment?.singBox) renderSingBoxDependency();
+  if (!value && state?.environment?.singBox) {
+    renderSingBoxDependency();
+    renderMihomoDependency();
+  }
+  if (state && $('#confirm-engine-switch')) updateEngineFields();
+  applyInteractionLocks();
+};
+
+const withTimeout = (promise, timeoutMs, message) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+
+const showStartupError = (message) => {
+  busy = false;
+  const cover = $('#loading-cover');
+  cover.classList.remove('hidden');
+  cover.classList.add('failed');
+  cover.querySelector('.spinner').classList.add('hidden');
+  cover.querySelector('span').textContent = message;
+  $('#reload-app').classList.remove('hidden');
+  $$('button').forEach((button) => {
+    button.disabled = button.id !== 'reload-app';
+  });
+};
+
+const installPhases = ['preparing', 'downloading', 'verifying', 'extracting', 'installing', 'validating'];
+const installPhaseLabels = {
+  preparing: '准备',
+  downloading: '下载',
+  verifying: '校验',
+  extracting: '解压',
+  installing: '安装',
+  validating: '验证',
+};
+
+const formatBytes = (value) => {
+  if (!Number.isFinite(value) || value < 0) return '';
+  if (value < 1024) return `${Math.round(value)} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 ** 2).toFixed(1)} MB`;
+};
+
+const formatRemaining = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  if (seconds < 60) return `约 ${Math.max(1, Math.ceil(seconds))} 秒`;
+  return `约 ${Math.ceil(seconds / 60)} 分钟`;
+};
+
+const renderInstallProgress = (target) => {
+  const record = installProgressByTarget.get(target);
+  if (!record) return;
+  const event = record.event;
+  const complete = event.phase === 'complete';
+  const failed = event.phase === 'failed';
+  const percent = Number.isFinite(event.percent) ? Math.max(0, Math.min(100, event.percent)) : 0;
+  const bytesText = event.receivedBytes
+    ? [
+        `${formatBytes(event.receivedBytes)}${event.totalBytes ? ` / ${formatBytes(event.totalBytes)}` : ''}`,
+        record.speed ? `${formatBytes(record.speed)}/s` : '',
+        event.totalBytes && record.speed ? formatRemaining((event.totalBytes - event.receivedBytes) / record.speed) : '',
+      ].filter(Boolean).join('  ·  ')
+    : '';
+  const stages = installPhases
+    .map((phase) => {
+      const active = event.phase === phase;
+      const done = complete || record.seen.has(phase) && !active;
+      return `<span class="install-progress-stage${active ? ' active' : ''}${done ? ' done' : ''}">${installPhaseLabels[phase]}</span>`;
+    })
+    .join('');
+  const markup = `<div class="install-progress-heading"><div><strong>${escapeHtml(event.message)}</strong><span>${escapeHtml(event.detail || (event.method === 'homebrew' ? 'Homebrew 正在运行' : '正在处理官方发布包'))}</span></div><span class="install-progress-percent">${failed ? '失败' : complete ? '完成' : event.indeterminate ? '进行中' : `${Math.round(percent)}%`}</span></div><div class="install-progress-track"><div class="install-progress-bar" style="width:${event.indeterminate && !complete && !failed ? '' : `${complete ? 100 : percent}%`}"></div></div><div class="install-progress-stages">${stages}</div>${bytesText ? `<div class="install-progress-meta">${escapeHtml(bytesText)}</div>` : ''}`;
+  const panels = target === 'mihomo'
+    ? [$('#mihomo-install-progress'), $('#onboarding-mihomo-install-progress')]
+    : [$('#sing-box-install-progress')];
+  panels.filter(Boolean).forEach((panel) => {
+    panel.className = `install-progress${event.indeterminate && !complete && !failed ? ' indeterminate' : ''}${complete ? ' complete' : ''}${failed ? ' failed' : ''}`;
+    panel.innerHTML = markup;
+    panel.classList.remove('hidden');
+  });
+};
+
+const handleInstallProgress = (event) => {
+  const now = Date.now();
+  const previous = installProgressByTarget.get(event.target);
+  const elapsed = previous && event.receivedBytes && previous.event.receivedBytes
+    ? Math.max(.001, (now - previous.updatedAt) / 1000)
+    : 0;
+  const speed = elapsed > 0
+    ? Math.max(0, (event.receivedBytes - previous.event.receivedBytes) / elapsed)
+    : previous?.speed ?? 0;
+  const seen = previous?.seen ?? new Set();
+  if (installPhases.includes(event.phase)) seen.add(event.phase);
+  installProgressByTarget.set(event.target, { event, updatedAt: now, speed, seen });
+  renderInstallProgress(event.target);
+
+  clearTimeout(installIndicatorTimer);
+  const indicator = $('#install-task-indicator');
+  const finished = event.phase === 'complete' || event.phase === 'failed';
+  indicator.classList.remove('hidden');
+  $('#install-task-label').textContent = event.message;
+  if (finished) installIndicatorTimer = setTimeout(() => indicator.classList.add('hidden'), 4500);
+};
+
+const applyInteractionLocks = () => {
+  if (!state) return;
+  const engineLocked = !state.runtimeModeConfirmed;
+  $$('[data-requires-engine]').forEach((control) => {
+    control.disabled = busy || engineLocked;
+  });
+  $('#next-action-button').disabled =
+    busy || (engineLocked && ['preview', 'sync', 'schedule'].includes(nextAction));
+  $('#clear-history').disabled = busy || state.history.length === 0;
+  $('#clean-old-backups').disabled = busy || state.backups.length <= 1;
+  if ($('#policy-group-options')) updatePolicyGroupSummary();
+  renderEngineOnboarding();
 };
 
 const switchView = (view) => {
@@ -104,10 +251,24 @@ const doctorAction = (check) => {
   if (check.level === 'ok') return '';
   if (check.label === 'nodeSources') return '<button class="mini-button" data-check-nav="sources">配置</button>';
   if (check.label === 'singBoxBinary') return '<button class="mini-button" data-check-nav="sing-box">安装</button>';
+  if (check.label === 'mihomoBinary') return '<button class="mini-button" data-check-nav="mihomo">安装</button>';
   if (check.label === 'surgeConfigPath' && state.profiles.length === 0) {
     return '<button class="mini-button" data-check-nav="surge-profile">选择</button>';
   }
-  if (['surgeConfigPath', 'outputDir', 'backupDir', 'proxy-group-section', 'proxy-section'].includes(check.label)) {
+  if (
+    [
+      'surgeConfigPath',
+      'outputDir',
+      'backupDir',
+      'mihomo-data-dir',
+      'mihomo-launch-agent',
+      'mihomo-controller',
+      'mihomo-listeners',
+      'proxy-group-section',
+      'proxy-section',
+      'rule-section',
+    ].includes(check.label)
+  ) {
     return `<button class="mini-button" data-repair-check="${escapeHtml(check.label)}">修复</button>`;
   }
   return '';
@@ -121,7 +282,7 @@ const doctorDetail = (check) => {
     if (!state.config.autoReload) return '已关闭同步后自动重载';
     if (check.level === 'warn') return '未配置 Surge HTTP API，同步后需要手动重载配置';
   }
-  if (['outputDir', 'backupDir'].includes(check.label) && check.level === 'warn') {
+  if (['outputDir', 'backupDir', 'mihomo-data-dir'].includes(check.label) && check.level === 'warn') {
     return check.detail.replace(/ \(not created yet; run `sync`\)$/, '（尚未创建）');
   }
   return check.detail;
@@ -135,10 +296,14 @@ const setWorkflowState = (name, status, detail) => {
 };
 
 const renderOverview = () => {
+  const runtimeModeConfirmed = state.runtimeModeConfirmed;
   const sourceReady = checkByLabel('nodeSources')?.level === 'ok';
-  const environmentReady = ['surgeConfigPath', 'singBoxBinary', 'proxy-group-section', 'proxy-section'].every(
-    (label) => checkByLabel(label)?.level === 'ok',
-  );
+  const binaryLabel = state.config.runtimeMode === 'mihomo' ? 'mihomoBinary' : 'singBoxBinary';
+  const environmentChecks = ['surgeConfigPath', binaryLabel, 'proxy-group-section', 'proxy-section', 'rule-section'];
+  if (state.config.runtimeMode === 'mihomo') {
+    environmentChecks.push('mihomo-config', 'mihomo-launch-agent', 'mihomo-controller', 'mihomo-listeners');
+  }
+  const environmentReady = environmentChecks.every((label) => checkByLabel(label)?.level === 'ok');
   const latestPreview = state.history.find((entry) => entry.action === 'preview' && entry.success);
   const latestSync = state.history.find(
     (entry) => ['sync', 'scheduled-sync'].includes(entry.action) && entry.success,
@@ -165,13 +330,24 @@ const renderOverview = () => {
   setWorkflowState(
     'environment',
     environmentReady ? 'done' : sourceReady ? 'current' : 'blocked',
-    environmentReady ? 'Surge 与 sing-box 已就绪' : `${state.doctor.failures} 项需要处理`,
+    environmentReady ? `Surge 与 ${state.config.runtimeMode === 'mihomo' ? 'Mihomo' : 'sing-box'} 已就绪` : `${state.doctor.failures} 项需要处理`,
   );
   setWorkflowState(
     'preview',
     previewReady ? 'done' : environmentReady ? 'current' : 'blocked',
     previewPlan ? `${previewPlan.count} 个节点，等待确认` : latestPreview ? `上次 ${formatDate(latestPreview.createdAt)}` : '查看写入前的实际变化',
   );
+
+  const activeDependency = state.config.runtimeMode === 'mihomo' ? state.environment.mihomo : state.environment.singBox;
+  $('#engine-summary-name').textContent = `${state.config.runtimeMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}${runtimeModeConfirmed ? '' : '（待确认）'}`;
+  $('#engine-summary-version').textContent = activeDependency.currentVersion ? `v${activeDependency.currentVersion}` : '未识别';
+  $('#engine-summary-service').textContent =
+    state.config.runtimeMode === 'mihomo'
+      ? state.environment.mihomoService.controllerReady
+        ? '后台运行中'
+        : '未连接'
+      : '由 Surge 按需启动';
+  $('#engine-summary-nodes').textContent = `${state.nodeCount} 个节点${state.config.runtimeMode === 'mihomo' ? `，${state.nodeCount} 个 listener` : ''}`;
   setWorkflowState(
     'sync',
     syncReady ? 'done' : previewPlan ? 'current' : 'blocked',
@@ -183,7 +359,18 @@ const renderOverview = () => {
     scheduleReady ? scheduleText(state.schedule) : '按需要启用',
   );
 
-  if (!sourceReady) {
+  if (!runtimeModeConfirmed) {
+    setWorkflowState('preview', 'blocked', '确认运行引擎后可用');
+    setWorkflowState('sync', 'blocked', '确认运行引擎后可用');
+    setWorkflowState('schedule', 'blocked', '确认运行引擎后可用');
+  }
+
+  if (!runtimeModeConfirmed) {
+    nextAction = 'engine';
+    $('#next-action-title').textContent = '确认运行引擎';
+    $('#next-action-detail').textContent = '先选择 External 或 Mihomo，确认后进入节点和路径配置。';
+    $('#next-action-button span').textContent = '前往选择';
+  } else if (!sourceReady) {
     nextAction = 'sources';
     $('#next-action-title').textContent = '添加节点来源';
     $('#next-action-detail').textContent = '先添加订阅地址或单个 VLESS 节点。';
@@ -218,6 +405,7 @@ const renderOverview = () => {
   const overall = state.doctor.failures > 0 ? 'fail' : state.doctor.warnings > 0 ? 'warn' : 'ok';
   $('#sidebar-dot').className = `state-dot ${overall}`;
   $('#sidebar-status').textContent = state.doctor.failures > 0 ? `${state.doctor.failures} 项需处理` : state.doctor.warnings > 0 ? `${state.doctor.warnings} 项提醒` : '运行正常';
+  $('.sidebar-state').title = $('#sidebar-status').textContent;
   $('#doctor-summary').textContent = state.doctor.failures > 0 ? `${state.doctor.failures} 项问题` : state.doctor.warnings > 0 ? `${state.doctor.warnings} 项提醒` : '全部通过';
 
   $('#doctor-list').innerHTML = state.doctor.checks
@@ -231,6 +419,46 @@ const renderOverview = () => {
   renderActivityList($('#recent-activity'), state.history.slice(0, 5), true);
 };
 
+const renderEngineOnboarding = () => {
+  if (!state) return;
+  const onboarding = $('#engine-onboarding');
+  const visible = !state.runtimeModeConfirmed;
+  onboarding.classList.toggle('hidden', !visible);
+  document.body.classList.toggle('engine-choice-required', visible);
+  if (!visible) {
+    engineOnboardingVisible = false;
+    return;
+  }
+  if (!engineOnboardingVisible) requestAnimationFrame(() => $('#engine-onboarding-external').focus());
+  engineOnboardingVisible = true;
+
+  const selectedMode = onboardingDraftMode;
+  $$('[data-onboarding-runtime-mode]').forEach((button) => {
+    const selected = button.dataset.onboardingRuntimeMode === selectedMode;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-checked', String(selected));
+    button.disabled = busy;
+  });
+  const mihomoSelected = selectedMode === 'mihomo';
+  const mihomoInstalled = state.environment.mihomo.installed;
+  $('#onboarding-mihomo-actions').classList.toggle('hidden', !mihomoSelected);
+  $('#onboarding-mihomo-status').textContent = mihomoInstalled
+    ? `已检测到 ${state.environment.mihomo.currentVersion ? `Mihomo v${state.environment.mihomo.currentVersion}` : 'Mihomo 可执行文件'}`
+    : '尚未检测到 Mihomo，可安装或选择已有文件。';
+  $('#onboarding-install-mihomo-direct').disabled = busy;
+  $('#onboarding-install-mihomo-brew').disabled = busy || !state.environment.homebrewPath;
+  $('#onboarding-choose-mihomo').disabled = busy;
+  $('#confirm-engine-choice span').textContent =
+    selectedMode === 'mihomo' ? '确认使用 Mihomo' : selectedMode === 'external' ? '确认使用 External' : '选择后继续';
+  $('#confirm-engine-choice').disabled = busy || !selectedMode || (mihomoSelected && !mihomoInstalled);
+  $('#engine-onboarding-status').textContent =
+    !selectedMode
+      ? '请选择一种运行方式。确认后，应用会检查对应内核和 Surge 配置。'
+      : mihomoSelected && !mihomoInstalled
+      ? '安装或选择 Mihomo 后才能确认。'
+      : '确认时会先验证目标引擎，失败时保留当前配置。';
+};
+
 const sourceDescription = (value, kind) => {
   if (!value) return kind === 'subscription' ? '等待填写订阅地址' : '等待填写 VLESS 节点';
   try {
@@ -242,7 +470,7 @@ const sourceDescription = (value, kind) => {
   }
 };
 
-const renderSourceList = (container, values, kind) => {
+const renderSourceList = (container, values, kind, names = []) => {
   if (values.length === 0) {
     container.innerHTML = `<button type="button" class="source-empty" data-source-add="${kind}"><i data-lucide="plus-circle"></i><strong>${kind === 'subscription' ? '添加第一个订阅' : '添加直接节点'}</strong><span>${kind === 'subscription' ? '支持 HTTP、HTTPS 和 data 地址' : '粘贴一个完整的 vless:// 地址'}</span></button>`;
     return;
@@ -253,6 +481,10 @@ const renderSourceList = (container, values, kind) => {
       const inputName = kind === 'subscription' ? 'subscription-url' : 'vless-node';
       const icon = kind === 'subscription' ? 'rss' : 'link-2';
       const placeholder = kind === 'subscription' ? 'https://example.com/subscription' : 'vless://uuid@example.com:443?...';
+      if (kind === 'subscription') {
+        const fallbackName = sourceDescription(value, kind);
+        return `<div class="source-row subscription-source-row"><span class="source-row-icon"><i data-lucide="${icon}"></i></span><div class="source-fields"><label><span>自定义名称</span><input class="source-name-input" data-source-name data-source-index="${index}" type="text" value="${escapeHtml(names[index] || '')}" placeholder="${escapeHtml(fallbackName)}" spellcheck="false" /></label><label><span>订阅地址</span><input class="source-url-input${secretsVisible ? '' : ' masked'}" data-source-input="subscription" data-source-index="${index}" name="${inputName}" type="text" value="${escapeHtml(value)}" placeholder="${placeholder}" spellcheck="false" /></label></div><button type="button" class="icon-button source-remove" data-source-remove="${kind}" data-source-index="${index}" title="移除"><i data-lucide="x"></i></button></div>`;
+      }
       return `<div class="source-row"><span class="source-row-icon"><i data-lucide="${icon}"></i></span><label><span>${escapeHtml(sourceDescription(value, kind))}</span><input class="source-row-input${secretsVisible ? '' : ' masked'}" data-source-input="${kind}" data-source-index="${index}" name="${inputName}" type="text" value="${escapeHtml(value)}" placeholder="${placeholder}" spellcheck="false" /></label><button type="button" class="icon-button source-remove" data-source-remove="${kind}" data-source-index="${index}" title="移除"><i data-lucide="x"></i></button></div>`;
     })
     .join('');
@@ -266,7 +498,7 @@ const renderSourceMeta = () => {
 };
 
 const renderSources = () => {
-  renderSourceList($('#subscription-list'), sourceDraft.subscriptionUrls, 'subscription');
+  renderSourceList($('#subscription-list'), sourceDraft.subscriptionUrls, 'subscription', sourceDraft.subscriptionNames);
   renderSourceList($('#vless-node-list'), sourceDraft.vlessNodes, 'vless');
   renderSourceMeta();
 };
@@ -465,9 +697,15 @@ const renderPolicyGroups = (config, selectedNames, selectedModes = config.policy
 
 const renderSettings = () => {
   const config = state.config;
+  engineDraftMode = config.runtimeMode;
   $('#config-path-label').textContent = state.configPath;
   $('#surge-config-path').value = config.surgeConfigPath;
   $('#sing-box-binary').value = config.singBoxBinary;
+  $('#mihomo-binary').value = config.mihomoBinary;
+  $('#mihomo-data-dir').value = config.mihomoDataDir;
+  $('#mihomo-controller-port').value = String(config.mihomoControllerPort);
+  $('#mihomo-auto-start').checked = config.mihomoAutoStart;
+  $('#mihomo-log-level').value = config.mihomoLogLevel;
   $('#policy-group-name').value = config.policyGroupName;
   renderPolicyGroups(config);
   $('#port-start').value = String(config.portStart);
@@ -484,8 +722,38 @@ const renderSettings = () => {
   $('#connect-timeout-enabled').checked = config.connectTimeoutEnabled;
   $('#connect-timeout-seconds').value = String(config.connectTimeoutSeconds);
   renderSingBoxDependency();
+  renderMihomoDependency();
+  updateEngineFields();
   updateResolverFields();
   updateConnectionOptionFields();
+};
+
+const updateEngineFields = () => {
+  $$('[data-runtime-mode]').forEach((button) => {
+    const selected = button.dataset.runtimeMode === engineDraftMode;
+    button.classList.toggle('active', selected);
+    button.classList.toggle('current', button.dataset.runtimeMode === state.config.runtimeMode);
+    button.setAttribute('aria-checked', String(selected));
+  });
+  $('#external-settings').classList.toggle('hidden', engineDraftMode !== 'external');
+  $('#external-resolver-settings').classList.toggle('hidden', engineDraftMode !== 'external');
+  $('#external-connect-timeout-setting').classList.toggle('hidden', engineDraftMode !== 'external');
+  $('#connect-timeout-field').classList.toggle('hidden', engineDraftMode !== 'external');
+  $('#mihomo-settings').classList.toggle('hidden', engineDraftMode !== 'mihomo');
+  const changed = engineDraftMode !== state.config.runtimeMode;
+  const switchButton = $('#confirm-engine-switch');
+  switchButton.classList.toggle('hidden', !changed);
+  switchButton.disabled = busy || (engineDraftMode === 'mihomo' && !state.environment.mihomo.installed);
+  switchButton.querySelector('span').textContent = engineDraftMode === 'mihomo' ? '确认切换到 Mihomo' : '确认切换到 External';
+  $('#engine-change-summary').textContent = changed
+    ? engineDraftMode === 'mihomo'
+      ? state.environment.mihomo.installed
+        ? '确认后会先保存当前设置，校验 Mihomo 配置，启动后台服务，再将 Surge 节点切换为 SOCKS5。失败时保留 External。'
+        : '请先在下方安装或选择 Mihomo，然后确认切换。'
+      : '确认后会先保存当前设置，恢复 External 节点，再停止 Mihomo 后台服务。失败时恢复 Mihomo 服务。'
+    : engineDraftMode === 'mihomo'
+      ? 'Surge 连接每个本地 SOCKS5 listener，Mihomo 在后台承载全部 VLESS 节点。'
+      : 'Surge 为每个节点按需启动独立 sing-box External 进程。';
 };
 
 const updateConnectionOptionFields = () => {
@@ -534,6 +802,38 @@ const renderSingBoxDependency = () => {
   $('#install-sing-box-brew').disabled = busy || !state.environment.homebrewPath;
 };
 
+const renderMihomoDependency = () => {
+  const dependency = state.environment.mihomo;
+  const sourceLabels = { managed: '官方托管版', homebrew: 'Homebrew', custom: '自定义路径', missing: '未安装' };
+  const versionState = $('#mihomo-version-state');
+  versionState.className = 'dependency-state';
+  if (!dependency.installed) {
+    versionState.textContent = '未安装';
+    versionState.classList.add('error');
+  } else if (!dependency.latestVersion) {
+    versionState.textContent = '未检查';
+  } else if (dependency.updateAvailable) {
+    versionState.textContent = '可更新';
+    versionState.classList.add('update');
+  } else {
+    versionState.textContent = '已是最新';
+    versionState.classList.add('ok');
+  }
+  $('#mihomo-current-version').textContent = dependency.currentVersion ? `v${dependency.currentVersion}` : '未识别';
+  $('#mihomo-latest-version').textContent = dependency.latestVersion ? `v${dependency.latestVersion}` : '未检查';
+  $('#mihomo-source').textContent = sourceLabels[dependency.source] ?? '未知';
+  $('#mihomo-install-detail').textContent = dependency.installed ? dependency.path : `官方版将安装到 ${state.environment.managedMihomoPath}`;
+  $('#mihomo-service-state').textContent = state.environment.mihomoService.loaded
+    ? state.environment.mihomoService.pid
+      ? `运行中，PID ${state.environment.mihomoService.pid}`
+      : '已加载'
+    : '未启动';
+  $('#mihomo-controller-state').textContent = state.environment.mihomoService.controllerReady ? '已连接' : '未连接';
+  $('#rollback-mihomo').disabled = busy || !dependency.rollbackAvailable;
+  $('#check-mihomo-update').disabled = busy;
+  $('#install-mihomo-brew').disabled = busy || !state.environment.homebrewPath;
+};
+
 const renderPreview = (plan) => {
   $('#preview-count').textContent = String(plan.count);
   $('#preview-added').textContent = `+${plan.added}`;
@@ -546,7 +846,7 @@ const renderPreview = (plan) => {
     plan.tcpFastOpen ? 'TCP Fast Open 已开启' : '',
     plan.connectTimeoutEnabled ? `连接超时 ${plan.connectTimeoutSeconds} 秒` : '',
   ].filter(Boolean);
-  $('#preview-subtitle').textContent = `${plan.count} 个节点已通过 sing-box 配置校验，${connectionSummary.join('，')}`;
+  $('#preview-subtitle').textContent = `${plan.count} 个节点已通过${plan.validationSummary ? ` ${plan.validationSummary}` : ' sing-box 配置校验'}，${connectionSummary.join('，')}`;
   const profilePath = $('#preview-profile-path');
   const policyGroup = $('#preview-policy-group');
   const policyGroupChanges = [
@@ -591,26 +891,44 @@ const renderAll = () => {
   renderSchedule();
   renderHistory();
   renderSettings();
+  renderEngineOnboarding();
+  applyInteractionLocks();
   window.lucide?.createIcons();
 };
 
 const loadState = async (showCover = true) => {
+  const previousEngineDraftMode = engineDraftMode;
+  let loaded = false;
   if (showCover) setBusy(true, '正在读取配置');
   try {
-    const [nextState, version] = await Promise.all([api.getState(), api.getVersion()]);
+    const stateRequest = Promise.all([api.getState(), api.getVersion()]);
+    const [nextState, version] = showCover
+      ? await withTimeout(stateRequest, STARTUP_TIMEOUT_MS, '读取配置超时，请重试。')
+      : await stateRequest;
     state = nextState;
+    loaded = true;
+    if (state.runtimeModeConfirmed) onboardingDraftMode = state.config.runtimeMode;
     $('#app-version').textContent = `v${version}`;
     sourceDraft = {
       subscriptionUrls: [...state.config.subscriptionUrls],
+      subscriptionNames: [...state.config.subscriptionNames],
       vlessNodes: [...state.config.vlessNodes],
     };
     sourcesDirty = false;
     renderAll();
-    if (!singBoxUpdateChecked) void refreshSingBoxStatus(false);
+    if (activeView === 'settings' && previousEngineDraftMode !== state.config.runtimeMode) {
+      engineDraftMode = previousEngineDraftMode;
+      updateEngineFields();
+    }
+    if (state.config.runtimeMode === 'mihomo') {
+      if (!mihomoUpdateChecked) void refreshMihomoStatus(false);
+    } else if (!singBoxUpdateChecked) void refreshSingBoxStatus(false);
   } catch (error) {
-    showToast(error.message || String(error), true);
+    const message = error.message || String(error);
+    showToast(message, true);
+    if (showCover) showStartupError(message);
   } finally {
-    if (showCover) setBusy(false);
+    if (showCover && loaded) setBusy(false);
   }
 };
 
@@ -642,8 +960,32 @@ const refreshSingBoxStatus = async (notify = true) => {
   }
 };
 
+const refreshMihomoStatus = async (notify = true) => {
+  const button = $('#check-mihomo-update');
+  button.disabled = true;
+  button.querySelector('span').textContent = '正在检查';
+  try {
+    state.environment.mihomo = await api.checkMihomoUpdate();
+    mihomoUpdateChecked = true;
+    renderMihomoDependency();
+    if (notify) showToast(state.environment.mihomo.updateAvailable ? `发现 Mihomo ${state.environment.mihomo.latestVersion}。` : 'Mihomo 已是最新稳定版。');
+  } catch (error) {
+    $('#mihomo-version-state').textContent = '检查失败';
+    $('#mihomo-version-state').className = 'dependency-state error';
+    if (notify) showToast(error.message || String(error), true);
+  } finally {
+    button.querySelector('span').textContent = '检查更新';
+    button.disabled = busy;
+  }
+};
+
 const runAction = async (action) => {
   if (busy) return;
+  if (!state.runtimeModeConfirmed && action !== 'doctor') {
+    $('#engine-onboarding').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showToast('请先选择并确认运行引擎。', true);
+    return;
+  }
   if (action === 'clean') {
     const confirmed = await api.confirm({ title: '清理托管配置', message: '将删除生成的节点配置和 Surge 托管区块。', detail: '执行前会自动备份 Surge 配置。' });
     if (!confirmed) return;
@@ -711,8 +1053,8 @@ const dnsServersFromInput = () =>
     .filter(Boolean);
 
 const runRepair = async (check) => {
-  if (check === 'proxy-group-section' || check === 'proxy-section') {
-    const section = check === 'proxy-section' ? '[Proxy]' : '[Proxy Group]';
+  if (check === 'proxy-group-section' || check === 'proxy-section' || check === 'rule-section') {
+    const section = check === 'proxy-section' ? '[Proxy]' : check === 'rule-section' ? '[Rule]' : '[Proxy Group]';
     const confirmed = await api.confirm({
       title: `补齐 ${section}`,
       message: `将在当前 Surge 配置末尾添加 ${section}。`,
@@ -747,7 +1089,7 @@ const installSingBox = async (method) => {
   });
   if (!confirmed) return;
 
-  setBusy(true, direct ? '正在下载并校验 sing-box' : '正在通过 Homebrew 安装');
+  setBusy(true, direct ? '正在下载并校验 sing-box' : '正在通过 Homebrew 安装', false);
   try {
     const result = await api.installSingBox(method);
     showToast(result.message, !result.success);
@@ -755,6 +1097,50 @@ const installSingBox = async (method) => {
     await loadState(false);
   } catch (error) {
     showToast(error.message || String(error), true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const installMihomo = async (method) => {
+  const confirmed = await api.confirm({
+    title: '安装 Mihomo',
+    message: method === 'direct' ? '将从 MetaCubeX 官方 GitHub 发布页下载安装包。' : '将通过 Homebrew 安装或更新 Mihomo。',
+    detail: method === 'direct' ? '会核对架构、文件大小和 SHA-256，并保留上一版。' : state.environment.homebrewPath || '当前没有检测到 Homebrew。',
+  });
+  if (!confirmed) return;
+  setBusy(true, '正在安装 Mihomo', false);
+  try {
+    const result = await api.installMihomo(method);
+    showToast(result.message, !result.success);
+    mihomoUpdateChecked = false;
+    await loadState(false);
+  } catch (error) {
+    showToast(error.message || String(error), true);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const rollbackMihomo = async () => {
+  const confirmed = await api.confirm({ title: '回退 Mihomo', message: '将恢复上一个官方托管版本。' });
+  if (!confirmed) return;
+  setBusy(true, '正在回退 Mihomo');
+  try {
+    const result = await api.rollbackMihomo();
+    showToast(result.message, !result.success);
+    await loadState(false);
+  } finally {
+    setBusy(false);
+  }
+};
+
+const controlMihomo = async (action) => {
+  setBusy(true, action === 'stop' ? '正在停止 Mihomo' : '正在启动 Mihomo');
+  try {
+    const result = await api.controlMihomo(action);
+    showToast(result.message, !result.success);
+    await loadState(false);
   } finally {
     setBusy(false);
   }
@@ -783,6 +1169,11 @@ const rollbackSingBox = async () => {
 };
 
 const runWorkflowAction = (action) => {
+  if (action === 'engine' || (!state.runtimeModeConfirmed && ['preview', 'sync', 'schedule'].includes(action))) {
+    $('#engine-onboarding').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (action !== 'engine') showToast('请先选择并确认运行引擎。', true);
+    return;
+  }
   if (sourcesDirty && ['preview', 'sync'].includes(action)) {
     switchView('sources');
     showToast('节点来源有未保存修改，请先保存来源。', true);
@@ -815,12 +1206,16 @@ const syncSourceDraftFromDom = () => {
   $$('[data-source-input="vless"]').forEach((input) => {
     sourceDraft.vlessNodes[Number(input.dataset.sourceIndex)] = input.value;
   });
+  $$('[data-source-name]').forEach((input) => {
+    sourceDraft.subscriptionNames[Number(input.dataset.sourceIndex)] = input.value;
+  });
 };
 
 const addSourceRow = (kind) => {
   syncSourceDraftFromDom();
   const values = kind === 'subscription' ? sourceDraft.subscriptionUrls : sourceDraft.vlessNodes;
   values.push('');
+  if (kind === 'subscription') sourceDraft.subscriptionNames.push('');
   sourcesDirty = true;
   renderSources();
   window.lucide?.createIcons();
@@ -831,6 +1226,7 @@ const removeSourceRow = (kind, index) => {
   syncSourceDraftFromDom();
   const values = kind === 'subscription' ? sourceDraft.subscriptionUrls : sourceDraft.vlessNodes;
   values.splice(index, 1);
+  if (kind === 'subscription') sourceDraft.subscriptionNames.splice(index, 1);
   sourcesDirty = true;
   renderSources();
   window.lucide?.createIcons();
@@ -867,10 +1263,15 @@ $('#sources-form').addEventListener('submit', async (event) => {
   try {
     state = await api.saveSources({
       subscriptionUrls: sourceDraft.subscriptionUrls.map((value) => value.trim()).filter(Boolean),
+      subscriptionNames: sourceDraft.subscriptionUrls
+        .map((value, index) => ({ value: value.trim(), name: sourceDraft.subscriptionNames[index]?.trim() ?? '' }))
+        .filter((entry) => entry.value)
+        .map((entry) => entry.name),
       vlessNodes: sourceDraft.vlessNodes.map((value) => value.trim()).filter(Boolean),
     });
     sourceDraft = {
       subscriptionUrls: [...state.config.subscriptionUrls],
+      subscriptionNames: [...state.config.subscriptionNames],
       vlessNodes: [...state.config.vlessNodes],
     };
     sourcesDirty = false;
@@ -981,10 +1382,27 @@ $('#choose-sing-box').addEventListener('click', async () => {
   const path = await api.chooseFile('sing-box');
   if (path) $('#sing-box-binary').value = path;
 });
+$('#choose-mihomo').addEventListener('click', async () => {
+  const path = await api.chooseFile('mihomo');
+  if (path) $('#mihomo-binary').value = path;
+});
 $('#install-sing-box-direct').addEventListener('click', () => installSingBox('direct'));
 $('#install-sing-box-brew').addEventListener('click', () => installSingBox('homebrew'));
 $('#check-sing-box-update').addEventListener('click', () => refreshSingBoxStatus(true));
 $('#rollback-sing-box').addEventListener('click', rollbackSingBox);
+$('#install-mihomo-direct').addEventListener('click', () => installMihomo('direct'));
+$('#install-mihomo-brew').addEventListener('click', () => installMihomo('homebrew'));
+$('#check-mihomo-update').addEventListener('click', () => refreshMihomoStatus(true));
+$('#rollback-mihomo').addEventListener('click', rollbackMihomo);
+$('#start-mihomo').addEventListener('click', () => controlMihomo('start'));
+$('#restart-mihomo').addEventListener('click', () => controlMihomo('restart'));
+$('#stop-mihomo').addEventListener('click', () => controlMihomo('stop'));
+$$('[data-runtime-mode]').forEach((button) =>
+  button.addEventListener('click', () => {
+    engineDraftMode = button.dataset.runtimeMode;
+    updateEngineFields();
+  }),
+);
 $('#select-all-policy-groups').addEventListener('click', () => {
   $$('#policy-group-options input[type="checkbox"]').forEach((input) => {
     input.checked = true;
@@ -1022,64 +1440,97 @@ $('#refresh-policy-groups').addEventListener('click', async () => {
   }
 });
 
+const settingsPayloadFromForm = () => {
+  const checkboxes = $$('#policy-group-options input[type="checkbox"]');
+  const visiblePolicyGroupNames = new Set(checkboxes.map((input) => input.value));
+  const policyGroupTargets = [
+    ...new Set([
+      ...checkboxes.filter((input) => input.checked).map((input) => input.value),
+      ...$('#policy-group-targets').value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+    ]),
+  ];
+  const selectedPolicyGroups = new Set(policyGroupTargets);
+  const visiblePolicyGroupModes = new Map(
+    $$('.policy-group-mode').map((select) => [select.dataset.policyGroupName, select.value]),
+  );
+  const policyGroupTargetModes = Object.fromEntries(
+    policyGroupTargets.map((name) => [name, visiblePolicyGroupModes.get(name) ?? state.config.policyGroupTargetModes?.[name] ?? 'auto']),
+  );
+  const policyGroupExclusions = [
+    ...new Set([
+      ...(state.config.policyGroupExclusions ?? []).filter(
+        (name) => !visiblePolicyGroupNames.has(name) && !selectedPolicyGroups.has(name),
+      ),
+      ...checkboxes
+        .filter(
+          (input) =>
+            !input.checked &&
+            input.dataset.containsPolicyGroup === 'true' &&
+            !selectedPolicyGroups.has(input.value),
+        )
+        .map((input) => input.value),
+    ]),
+  ];
+  return {
+    ...state.config,
+    runtimeMode: state.config.runtimeMode,
+    surgeConfigPath: $('#surge-config-path').value,
+    singBoxBinary: $('#sing-box-binary').value,
+    mihomoBinary: $('#mihomo-binary').value,
+    mihomoDataDir: $('#mihomo-data-dir').value,
+    mihomoControllerPort: Number($('#mihomo-controller-port').value),
+    mihomoAutoStart: $('#mihomo-auto-start').checked,
+    mihomoLogLevel: $('#mihomo-log-level').value,
+    policyGroupName: $('#policy-group-name').value,
+    policyGroupTargets,
+    policyGroupExclusions,
+    policyGroupTargetModes,
+    portStart: Number($('#port-start').value),
+    backupKeep: Number($('#backup-keep').value),
+    autoReload: $('#auto-reload').checked,
+    udpRelay: $('#udp-relay').checked,
+    udpTestEnabled: $('#udp-test-enabled').checked,
+    udpTestTarget: $('#udp-test-target').value,
+    tcpFastOpen: $('#tcp-fast-open').checked,
+    connectTimeoutEnabled: $('#connect-timeout-enabled').checked,
+    connectTimeoutSeconds: Number($('#connect-timeout-seconds').value),
+    addressResolverStrategy: $('#resolver-strategy').value,
+    addressResolverDohEndpoint: $('#doh-endpoint').value,
+    addressResolverDnsServers: dnsServersFromInput(),
+    addressResolverFilterSurgeFakeIp: $('#filter-surge-fake-ip').checked,
+  };
+};
+
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   setBusy(true, '正在保存设置');
   try {
-    const checkboxes = $$('#policy-group-options input[type="checkbox"]');
-    const visiblePolicyGroupNames = new Set(checkboxes.map((input) => input.value));
-    const policyGroupTargets = [
-      ...new Set([
-        ...checkboxes.filter((input) => input.checked).map((input) => input.value),
-        ...$('#policy-group-targets').value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-      ]),
-    ];
-    const selectedPolicyGroups = new Set(policyGroupTargets);
-    const visiblePolicyGroupModes = new Map(
-      $$('.policy-group-mode').map((select) => [select.dataset.policyGroupName, select.value]),
-    );
-    const policyGroupTargetModes = Object.fromEntries(
-      policyGroupTargets.map((name) => [name, visiblePolicyGroupModes.get(name) ?? state.config.policyGroupTargetModes?.[name] ?? 'auto']),
-    );
-    const policyGroupExclusions = [
-      ...new Set([
-        ...(state.config.policyGroupExclusions ?? []).filter(
-          (name) => !visiblePolicyGroupNames.has(name) && !selectedPolicyGroups.has(name),
-        ),
-        ...checkboxes
-          .filter(
-            (input) =>
-              !input.checked &&
-              input.dataset.containsPolicyGroup === 'true' &&
-              !selectedPolicyGroups.has(input.value),
-          )
-          .map((input) => input.value),
-      ]),
-    ];
-    state = await api.saveSettings({
-      ...state.config,
-      surgeConfigPath: $('#surge-config-path').value,
-      singBoxBinary: $('#sing-box-binary').value,
-      policyGroupName: $('#policy-group-name').value,
-      policyGroupTargets,
-      policyGroupExclusions,
-      policyGroupTargetModes,
-      portStart: Number($('#port-start').value),
-      backupKeep: Number($('#backup-keep').value),
-      autoReload: $('#auto-reload').checked,
-      udpRelay: $('#udp-relay').checked,
-      udpTestEnabled: $('#udp-test-enabled').checked,
-      udpTestTarget: $('#udp-test-target').value,
-      tcpFastOpen: $('#tcp-fast-open').checked,
-      connectTimeoutEnabled: $('#connect-timeout-enabled').checked,
-      connectTimeoutSeconds: Number($('#connect-timeout-seconds').value),
-      addressResolverStrategy: $('#resolver-strategy').value,
-      addressResolverDohEndpoint: $('#doh-endpoint').value,
-      addressResolverDnsServers: dnsServersFromInput(),
-      addressResolverFilterSurgeFakeIp: $('#filter-surge-fake-ip').checked,
-    });
+    state = await api.saveSettings(settingsPayloadFromForm());
     renderAll();
     showToast('设置已保存。');
+  } catch (error) {
+    showToast(error.message || String(error), true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('#confirm-engine-switch').addEventListener('click', async () => {
+  const targetMode = engineDraftMode;
+  if (targetMode === state.config.runtimeMode) return;
+  const confirmed = await api.confirm({
+    title: targetMode === 'mihomo' ? '切换到 Mihomo 网关' : '切换到 sing-box External',
+    message: $('#engine-change-summary').textContent,
+    detail: '切换前会保存当前设置，校验目标引擎并备份 Surge 配置。',
+  });
+  if (!confirmed) return;
+  setBusy(true, '正在切换运行引擎');
+  try {
+    state = await api.saveSettings(settingsPayloadFromForm());
+    const result = await api.switchEngine(targetMode);
+    showToast(result.message, !result.success);
+    state = await api.getState();
+    renderAll();
   } catch (error) {
     showToast(error.message || String(error), true);
   } finally {
@@ -1090,6 +1541,48 @@ $('#settings-form').addEventListener('submit', async (event) => {
 $('#udp-relay').addEventListener('change', updateConnectionOptionFields);
 $('#udp-test-enabled').addEventListener('change', updateConnectionOptionFields);
 $('#connect-timeout-enabled').addEventListener('change', updateConnectionOptionFields);
+
+$$('[data-onboarding-runtime-mode]').forEach((button) =>
+  button.addEventListener('click', () => {
+    onboardingDraftMode = button.dataset.onboardingRuntimeMode;
+    renderEngineOnboarding();
+    window.lucide?.createIcons();
+  }),
+);
+
+$('#onboarding-install-mihomo-direct').addEventListener('click', () => installMihomo('direct'));
+$('#onboarding-install-mihomo-brew').addEventListener('click', () => installMihomo('homebrew'));
+$('#onboarding-choose-mihomo').addEventListener('click', async () => {
+  const selectedPath = await api.chooseFile('mihomo');
+  if (!selectedPath) return;
+  setBusy(true, '正在保存 Mihomo 路径');
+  try {
+    state = await api.saveSettings({ ...state.config, mihomoBinary: selectedPath });
+    onboardingDraftMode = 'mihomo';
+    renderAll();
+    showToast('已使用选择的 Mihomo 文件。');
+  } catch (error) {
+    showToast(error.message || String(error), true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('#confirm-engine-choice').addEventListener('click', async () => {
+  if (!onboardingDraftMode) return;
+  const targetMode = onboardingDraftMode;
+  setBusy(true, '正在确认运行引擎');
+  try {
+    const result = await api.switchEngine(targetMode);
+    showToast(result.message, !result.success);
+    state = await api.getState();
+    renderAll();
+  } catch (error) {
+    showToast(error.message || String(error), true);
+  } finally {
+    setBusy(false);
+  }
+});
 
 document.addEventListener('click', async (event) => {
   const sourceAdd = event.target.closest('[data-source-add]');
@@ -1105,6 +1598,12 @@ document.addEventListener('click', async (event) => {
     if (target === 'sing-box') {
       switchView('settings');
       $('#install-sing-box-direct').focus();
+    }
+    if (target === 'mihomo') {
+      switchView('settings');
+      engineDraftMode = 'mihomo';
+      updateEngineFields();
+      $('#install-mihomo-direct').focus();
     }
     if (target === 'surge-profile') {
       switchView('settings');
@@ -1122,15 +1621,23 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('input', (event) => {
+  const nameInput = event.target.closest('[data-source-name]');
+  if (nameInput) {
+    sourceDraft.subscriptionNames[Number(nameInput.dataset.sourceIndex)] = nameInput.value;
+    sourcesDirty = true;
+    renderSourceMeta();
+    return;
+  }
   const input = event.target.closest('[data-source-input]');
   if (!input) return;
   const values = input.dataset.sourceInput === 'subscription' ? sourceDraft.subscriptionUrls : sourceDraft.vlessNodes;
   values[Number(input.dataset.sourceIndex)] = input.value;
   sourcesDirty = true;
-  input.closest('.source-row').querySelector('label > span').textContent = sourceDescription(
-    input.value,
-    input.dataset.sourceInput,
-  );
+  if (input.dataset.sourceInput === 'subscription') {
+    input.closest('.source-row').querySelector('[data-source-name]').placeholder = sourceDescription(input.value, 'subscription');
+  } else {
+    input.closest('.source-row').querySelector('label > span').textContent = sourceDescription(input.value, 'vless');
+  }
   renderSourceMeta();
 });
 
@@ -1144,6 +1651,9 @@ document.addEventListener('paste', (event) => {
   syncSourceDraftFromDom();
   const values = input.dataset.sourceInput === 'subscription' ? sourceDraft.subscriptionUrls : sourceDraft.vlessNodes;
   values.splice(Number(input.dataset.sourceIndex), 1, ...lines);
+  if (input.dataset.sourceInput === 'subscription') {
+    sourceDraft.subscriptionNames.splice(Number(input.dataset.sourceIndex), 1, ...lines.map(() => ''));
+  }
   sourcesDirty = true;
   renderSources();
   window.lucide?.createIcons();
@@ -1166,6 +1676,17 @@ $('#copy-output').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#action-output').textContent || '');
   showToast('执行输出已复制。');
 });
+
+$('#install-task-indicator').addEventListener('click', () => {
+  const active = [...installProgressByTarget.values()].sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  if (!active) return;
+  switchView('settings');
+  engineDraftMode = active.event.target === 'mihomo' ? 'mihomo' : 'external';
+  updateEngineFields();
+  $(`#${active.event.target}-install-progress`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+
+api.onInstallProgress(handleInstallProgress);
 
 window.lucide?.createIcons();
 void loadState();

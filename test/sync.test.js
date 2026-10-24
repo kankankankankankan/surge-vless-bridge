@@ -377,17 +377,23 @@ test('refuses to touch the profile when no source yields a VLESS node', async ()
 
 test('names the failing subscription without leaking its token', async () => {
   const { config } = await makeConfig('failing-url');
+  const node = vlessLink(1, 'Alive');
   config.subscriptionUrls = [
-    subscriptionUrl([vlessLink(1, 'Alive')]),
+    subscriptionUrl([node, node]),
     'https://sub.example.invalid/link/TOKEN-SECRET?flag=surge',
   ];
+  config.vlessNodes = [node];
 
-  await assert.rejects(syncSubscriptionToSurge(config), (error) => {
-    assert.match(error.message, /Subscription 2 of 2/);
-    assert.match(error.message, /https:\/\/sub\.example\.invalid/);
-    assert.doesNotMatch(error.message, /TOKEN-SECRET/);
-    return true;
+  let result;
+  const warnings = await captureConsole('warn', async () => {
+    result = await syncSubscriptionToSurge(config);
   });
+
+  assert.match(warnings, /Subscription 2 of 2/);
+  assert.match(warnings, /https:\/\/sub\.example\.invalid/);
+  assert.doesNotMatch(warnings, /TOKEN-SECRET|flag=surge|\/link\//);
+  assert.equal(result.count, 1);
+  assert.equal(await policyGroupLine(config), 'VLESS = url-test, Alive, no-alert=0, hidden=0');
 });
 
 test('leaves the profile and existing node configs untouched when sing-box rejects a config', async () => {

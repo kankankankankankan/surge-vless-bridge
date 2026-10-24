@@ -14,6 +14,7 @@ const {
 } = require('../dist/desktop/dependencies.js');
 const { renderLaunchAgentPlist } = require('../dist/desktop/scheduler.js');
 const { readLogTail } = require('../dist/desktop/storage.js');
+const { assertRuntimeModeConfirmed } = require('../dist/runtime-mode.js');
 const { PROFILE_TEXT, subscriptionUrl, vlessLink } = require('./helpers.js');
 
 test('renders an escaped launchd job for interval schedules', () => {
@@ -92,6 +93,7 @@ test('desktop service preserves CLI config and runs the shared sync core', async
     configPath,
     JSON.stringify(
       {
+        runtimeModeConfirmed: true,
         subscriptionUrls: [],
         vlessNodes: [],
         surgeConfigPath: profilePath,
@@ -118,7 +120,7 @@ test('desktop service preserves CLI config and runs the shared sync core', async
   assert.match(doctorBeforeSetup.message, /发现 1 项问题/);
 
   const source = subscriptionUrl([vlessLink(1, 'Desktop Node')]);
-  await service.saveSources({ subscriptionUrls: [source], vlessNodes: [] });
+  await service.saveSources({ subscriptionUrls: [source], subscriptionNames: ['主力订阅'], vlessNodes: [] });
 
   const preview = await service.runAction('preview');
   assert.equal(preview.success, true);
@@ -139,6 +141,7 @@ test('desktop service preserves CLI config and runs the shared sync core', async
   const state = await service.getState();
   assert.equal(state.nodeCount, 1);
   assert.equal(state.config.subscriptionUrls[0], source);
+  assert.equal(state.config.subscriptionNames[0], '主力订阅');
   assert.equal(state.history[0].action, 'sync');
   assert.equal(state.history[0].success, true);
   assert.deepEqual(state.policyGroups, [
@@ -153,6 +156,120 @@ test('desktop service preserves CLI config and runs the shared sync core', async
     },
   ]);
   assert.match(await readFile(profilePath, 'utf8'), /^Desktop Node = external,/m);
+});
+
+test('unconfirmed runtime blocks writes and schedule activation until External is confirmed', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-runtime-confirmation-'));
+  const configPath = path.join(root, 'config.json');
+  const profilePath = path.join(root, 'profile.conf');
+  await writeFile(profilePath, PROFILE_TEXT, 'utf8');
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      runtimeMode: 'external',
+      runtimeModeConfirmed: false,
+      vlessNodes: [vlessLink(1, 'Blocked')],
+      surgeConfigPath: profilePath,
+      singBoxBinary: '/usr/bin/true',
+      outputDir: path.join(root, 'nodes'),
+      backupDir: path.join(root, 'backups'),
+      subscriptionOutputPath: path.join(root, 'vless_nodes.txt'),
+      addressResolver: 'off',
+      autoReload: false,
+    }),
+    'utf8',
+  );
+  const service = new DesktopService({
+    configPath,
+    executablePath: '/usr/bin/node',
+    scheduledEntryPath: path.join(root, 'scheduled-run.js'),
+  });
+
+  const preview = await service.runAction('preview');
+  assert.equal(preview.success, false);
+  assert.equal(preview.message, '请先选择并确认运行引擎。');
+  await assert.rejects(
+    service.saveSchedule({ enabled: true, kind: 'interval', intervalHours: 12, hour: 8, minute: 0, runAtLoad: false }),
+    /请先选择并确认运行引擎/,
+  );
+  assert.throws(() => assertRuntimeModeConfirmed({ runtimeModeConfirmed: false }), /请先选择并确认运行引擎/);
+  assert.doesNotThrow(() => assertRuntimeModeConfirmed({ runtimeModeConfirmed: true }));
+
+  const confirmed = await service.switchEngine('external');
+  assert.equal(confirmed.success, true);
+  assert.equal((await service.getState()).runtimeModeConfirmed, true);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).runtimeModeConfirmed, true);
+});
+
+test('engine switch restores config, Surge text and an installed stopped service when saving fails', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-switch-rollback-'));
+  const configPath = path.join(root, 'config.json');
+  const profilePath = path.join(root, 'profile.conf');
+  const originalConfig = `${JSON.stringify(
+    {
+      runtimeMode: 'external',
+      runtimeModeConfirmed: true,
+      mihomo: {
+        binary: '/usr/bin/true',
+        dataDir: path.join(root, 'mihomo'),
+        controllerSecret: 'test-controller-secret',
+      },
+      vlessNodes: [vlessLink(1, 'Rollback')],
+      surgeConfigPath: profilePath,
+      singBoxBinary: '/usr/bin/true',
+      outputDir: path.join(root, 'nodes'),
+      backupDir: path.join(root, 'backups'),
+      subscriptionOutputPath: path.join(root, 'vless_nodes.txt'),
+      addressResolver: 'off',
+      autoReload: false,
+    },
+    null,
+    2,
+  )}\n`;
+  const originalSurge = PROFILE_TEXT;
+  await writeFile(configPath, originalConfig, 'utf8');
+  await writeFile(profilePath, originalSurge, 'utf8');
+  const syncCalls = [];
+  const serviceCalls = [];
+  let configWriteCount = 0;
+  const service = new DesktopService({
+    configPath,
+    executablePath: '/usr/bin/node',
+    scheduledEntryPath: path.join(root, 'scheduled-run.js'),
+    dependencies: {
+      switchSync: async (config, options = {}) => {
+        syncCalls.push({ runtimeMode: config.runtimeMode, runtimeModeConfirmed: config.runtimeModeConfirmed, dryRun: Boolean(options.dryRun) });
+        if (!options.dryRun) await writeFile(profilePath, 'changed during switch\n', 'utf8');
+        return { count: 1 };
+      },
+      readMihomoServiceStatus: async () => ({ installed: true, loaded: false, controllerReady: false }),
+      installMihomoService: async () => {
+        serviceCalls.push('install');
+        return '/tmp/test.plist';
+      },
+      stopMihomoService: async () => {
+        serviceCalls.push('stop');
+      },
+      writeConfigFile: async (targetPath, text) => {
+        configWriteCount += 1;
+        if (configWriteCount === 1) throw new Error('simulated config save failure');
+        await writeFile(targetPath, text, 'utf8');
+      },
+    },
+  });
+
+  const result = await service.switchEngine('mihomo');
+
+  assert.equal(result.success, false);
+  assert.match(result.message, /simulated config save failure/);
+  assert.deepEqual(syncCalls, [
+    { runtimeMode: 'mihomo', runtimeModeConfirmed: false, dryRun: true },
+    { runtimeMode: 'mihomo', runtimeModeConfirmed: false, dryRun: false },
+  ]);
+  assert.deepEqual(serviceCalls, ['install', 'stop']);
+  assert.equal(await readFile(profilePath, 'utf8'), originalSurge);
+  assert.equal(await readFile(configPath, 'utf8'), originalConfig);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).runtimeMode, 'external');
 });
 
 test('desktop log hides the known Electron launchd warning and keeps useful sync output', async () => {
@@ -273,7 +390,7 @@ test('desktop package collects renderer assets from stable source paths', async 
   assert.deepEqual(resources[0], {
     from: 'desktop',
     to: 'renderer',
-    filter: ['index.html', 'styles.css', 'app.js'],
+    filter: ['index.html', 'styles.css', 'app.js', 'boot.js'],
   });
   assert.deepEqual(resources[1], {
     from: 'node_modules/lucide/dist/umd/lucide.min.js',
@@ -292,12 +409,49 @@ test('desktop package collects renderer assets from stable source paths', async 
 test('desktop custom interval uses a full-width second row', async () => {
   const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
   const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');
+  assert.match(html, /class="field-grid schedule-grid"/);
   assert.match(html, /id="schedule-custom-interval" class="custom-interval-row hidden"/);
   assert.match(css, /\.interval-controls \{ display: grid; gap: 8px; min-width: 0; \}/);
   assert.match(css, /\.field-grid\.two \{[^}]*align-items: start;/);
+  assert.match(css, /\.schedule-grid \{ grid-template-columns: 160px minmax\(300px, 1fr\); align-items: start; \}/);
+  assert.match(css, /@media \(max-width: 820px\)[\s\S]*?\.schedule-grid \{ grid-template-columns: 1fr; \}/);
   assert.match(css, /\.custom-interval-row \{[^}]*grid-template-columns: auto minmax\(0, 1fr\)/);
   assert.match(css, /\.number-suffix \{[^}]*width: 100%;/);
   assert.doesNotMatch(css, /\.number-suffix \{[^}]*width: 160px;/);
+});
+
+test('desktop exposes named subscriptions, inline engine switching and install progress', async () => {
+  const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
+  const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');
+  const app = await readFile(path.join(__dirname, '..', 'desktop', 'app.js'), 'utf8');
+  const preload = await readFile(path.join(__dirname, '..', 'src', 'desktop', 'preload.ts'), 'utf8');
+  const main = await readFile(path.join(__dirname, '..', 'src', 'desktop', 'main.ts'), 'utf8');
+
+  assert.match(html, /id="confirm-engine-switch"/);
+  assert.match(html, /id="sing-box-install-progress"/);
+  assert.match(html, /id="mihomo-install-progress"/);
+  assert.match(html, /<details class="section-block advanced-settings">/);
+  assert.match(app, /data-source-name/);
+  assert.match(app, /subscriptionNames/);
+  assert.doesNotMatch(css, /\.source-row:focus-within[^}]*box-shadow: inset 3px 0/);
+  assert.match(css, /\.source-fields input:focus \{[^}]*box-shadow:/);
+  assert.match(preload, /desktop:install-progress/);
+  assert.match(main, /webContents\.send\('desktop:install-progress'/);
+});
+
+test('desktop startup is recoverable and topbar button labels have stable centering', async () => {
+  const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
+  const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');
+  const app = await readFile(path.join(__dirname, '..', 'desktop', 'app.js'), 'utf8');
+  const boot = await readFile(path.join(__dirname, '..', 'desktop', 'boot.js'), 'utf8');
+
+  assert.match(html, /id="reload-app"[^>]*class="button secondary hidden"/);
+  assert.match(html, /<script src="boot\.js"><\/script>/);
+  assert.match(boot, /读取配置超时，请重试/);
+  assert.match(css, /\.topbar-actions \.button > span \{ display: inline-flex; align-items: center; line-height: 1; \}/);
+  assert.match(css, /\.loading-cover\.failed \{ flex-direction: column; \}/);
+  assert.match(app, /const STARTUP_TIMEOUT_MS = 12000;/);
+  assert.match(app, /showStartupError\(message\)/);
 });
 
 test('desktop preview keeps its controls and columns inside narrow windows', async () => {
@@ -314,6 +468,23 @@ test('desktop preview keeps its controls and columns inside narrow windows', asy
   assert.match(css, /grid-template-columns: minmax\(0, 1\.1fr\) minmax\(0, 1fr\) minmax\(72px, 90px\)/);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]*?\.preview-metrics \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]*?\.preview-footer \{[^}]*flex-direction: column/);
+});
+
+test('desktop prioritizes engine selection and keeps narrow layouts usable', async () => {
+  const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
+  const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');
+  const app = await readFile(path.join(__dirname, '..', 'desktop', 'app.js'), 'utf8');
+
+  assert.match(html, /id="engine-onboarding"[^>]*role="dialog"[^>]*aria-modal="true"/);
+  assert.match(html, /id="confirm-engine-choice"[^>]*disabled/);
+  assert.match(css, /\.engine-onboarding \{ position: fixed; inset: 0; z-index: 110;/);
+  assert.match(css, /\.engine-onboarding-panel \{[^}]*max-height: calc\(100vh - 64px\);[^}]*overflow: auto;/);
+  assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.app-shell \{ grid-template-columns: 76px 1fr; \}/);
+  assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.nav-item span \{ display: none; \}/);
+  assert.match(css, /@media \(max-width: 820px\)[\s\S]*?\.engine-choice-grid, \.engine-switch-grid, \.field-grid\.two \{ grid-template-columns: 1fr; \}/);
+  assert.match(css, /\.engine-summary strong, \.service-status strong \{[^}]*overflow-wrap: anywhere;/);
+  assert.match(app, /document\.body\.classList\.toggle\('engine-choice-required', visible\)/);
+  assert.match(app, /if \(!onboardingDraftMode\) return;/);
 });
 
 test('desktop settings preserve editable DNS resolver values', async () => {
@@ -410,6 +581,38 @@ test('desktop environment repair creates directories and backs up section change
   assert.equal(state.doctor.checks.find((check) => check.label === 'outputDir').level, 'ok');
   assert.equal(state.doctor.checks.find((check) => check.label === 'backupDir').level, 'ok');
   assert.equal(state.backups.length, 2);
+});
+
+test('desktop Mihomo repair creates only the active engine data directory', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-mihomo-repair-'));
+  const configPath = path.join(root, 'config.json');
+  const profilePath = path.join(root, 'profile.conf');
+  const mihomoDataDir = path.join(root, 'mihomo-data');
+  const outputDir = path.join(root, 'external-nodes');
+  await writeFile(profilePath, PROFILE_TEXT, 'utf8');
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      runtimeMode: 'mihomo',
+      mihomo: { binary: '/usr/bin/true', dataDir: mihomoDataDir, controllerSecret: '' },
+      vlessNodes: [vlessLink(1, 'Mihomo Repair')],
+      surgeConfigPath: profilePath,
+      outputDir,
+      backupDir: path.join(root, 'backups'),
+      subscriptionOutputPath: path.join(root, 'vless_nodes.txt'),
+      autoReload: false,
+    }),
+    'utf8',
+  );
+  const service = new DesktopService({
+    configPath,
+    executablePath: '/usr/bin/node',
+    scheduledEntryPath: path.join(root, 'scheduled-run.js'),
+  });
+
+  assert.equal((await service.repairCheck('mihomo-data-dir')).success, true);
+  assert.ok((await readdir(root)).includes('mihomo-data'));
+  assert.ok(!(await readdir(root)).includes('external-nodes'));
 });
 
 test('desktop maintenance clears history and keeps the latest backup', async () => {

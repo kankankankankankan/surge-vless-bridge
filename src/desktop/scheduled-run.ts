@@ -5,7 +5,8 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { loadCliConfig } from '../configuration';
-import { syncSubscriptionToSurge } from '../surge';
+import { syncBridge } from '../engines';
+import { assertRuntimeModeConfirmed } from '../runtime-mode';
 import { recordActivity } from './storage';
 
 const execFileAsync = promisify(execFile);
@@ -39,13 +40,14 @@ const main = async () => {
   }
 
   const loaded = await loadCliConfig({ cwd: process.cwd(), configPath });
+  assertRuntimeModeConfirmed(loaded.config);
   const historyPath = join(dirname(configPath), 'desktop', 'history.json');
   const startedAt = new Date().toISOString();
-  console.log(`[${startedAt}] Scheduled sync started.`);
+  console.log(`[${startedAt}] Scheduled sync started (${loaded.config.runtimeMode}).`);
 
   try {
-    const result = await syncSubscriptionToSurge(loaded.config);
-    const message = `定时同步已完成，共 ${result.count} 个节点。`;
+    const result = await syncBridge(loaded.config);
+    const message = `定时同步已完成，引擎 ${loaded.config.runtimeMode}，共 ${result.count} 个节点。`;
     console.log(message);
     await recordActivity(historyPath, {
       action: 'scheduled-sync',

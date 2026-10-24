@@ -1,5 +1,8 @@
-import type { AddressResolverStrategy, PolicyGroupTargetMode } from '../types/cli-config';
+import type { AddressResolverStrategy, PolicyGroupTargetMode, RuntimeMode } from '../types/cli-config';
 import type { SingBoxVersionStatus } from './dependencies';
+import type { MihomoVersionStatus } from '../mihomo/dependencies';
+import type { MihomoServiceStatus } from '../mihomo/launch-agent';
+import type { InstallProgressEvent } from '../install-progress';
 
 export type DesktopAction = 'doctor' | 'preview' | 'sync' | 'rebuild' | 'restore' | 'clean';
 
@@ -7,10 +10,17 @@ export type RepairableCheck =
   | 'surgeConfigPath'
   | 'outputDir'
   | 'backupDir'
+  | 'mihomo-data-dir'
+  | 'mihomo-launch-agent'
+  | 'mihomo-controller'
+  | 'mihomo-listeners'
   | 'proxy-group-section'
-  | 'proxy-section';
+  | 'proxy-section'
+  | 'rule-section';
 
 export type SingBoxInstallMethod = 'direct' | 'homebrew';
+export type MihomoInstallMethod = 'direct' | 'homebrew';
+export type MihomoServiceAction = 'start' | 'stop' | 'restart';
 
 export type ActivityEntry = {
   id: string;
@@ -20,7 +30,13 @@ export type ActivityEntry = {
     | 'repair-environment'
     | 'install-sing-box'
     | 'update-sing-box'
-    | 'rollback-sing-box';
+    | 'rollback-sing-box'
+    | 'install-mihomo'
+    | 'update-mihomo'
+    | 'rollback-mihomo'
+    | 'start-mihomo'
+    | 'stop-mihomo'
+    | 'switch-engine';
   success: boolean;
   message: string;
   output: string;
@@ -38,10 +54,17 @@ export type ScheduleSettings = {
 };
 
 export type DesktopConfigView = {
+  runtimeMode: RuntimeMode;
   subscriptionUrls: string[];
+  subscriptionNames: string[];
   vlessNodes: string[];
   surgeConfigPath: string;
   singBoxBinary: string;
+  mihomoBinary: string;
+  mihomoDataDir: string;
+  mihomoControllerPort: number;
+  mihomoAutoStart: boolean;
+  mihomoLogLevel: 'silent' | 'error' | 'warning' | 'info' | 'debug';
   policyGroupName: string;
   policyGroupTargets: string[];
   policyGroupExclusions: string[];
@@ -87,6 +110,7 @@ export type PolicyGroupView = {
 export type DesktopState = {
   configPath: string;
   configExists: boolean;
+  runtimeModeConfirmed: boolean;
   config: DesktopConfigView;
   doctor: {
     checks: DoctorCheckView[];
@@ -103,7 +127,11 @@ export type DesktopState = {
   environment: {
     homebrewPath?: string;
     managedSingBoxPath: string;
+    managedMihomoPath: string;
     singBox: SingBoxVersionStatus;
+    mihomo: MihomoVersionStatus;
+    mihomoService: MihomoServiceStatus;
+    controllerSecretConfigured: boolean;
   };
 };
 
@@ -138,6 +166,10 @@ export type ActionResult = {
     surgeConfigPath: string;
     outputDir: string;
     nodes: Array<{ name: string; port: number; server: string }>;
+    runtimeMode?: RuntimeMode;
+    engineLabel?: string;
+    proxyFormat?: string;
+    validationSummary?: string;
   };
 };
 
@@ -145,18 +177,24 @@ export type DesktopApi = {
   getVersion: () => Promise<string>;
   getState: () => Promise<DesktopState>;
   inspectPolicyGroups: (input: { surgeConfigPath: string; policyGroupName: string }) => Promise<PolicyGroupView[]>;
-  saveSources: (input: { subscriptionUrls: string[]; vlessNodes: string[] }) => Promise<DesktopState>;
+  saveSources: (input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) => Promise<DesktopState>;
   saveSettings: (input: DesktopConfigView) => Promise<DesktopState>;
   runAction: (action: DesktopAction) => Promise<ActionResult>;
   repairCheck: (check: RepairableCheck) => Promise<ActionResult>;
   installSingBox: (method: SingBoxInstallMethod) => Promise<ActionResult>;
   checkSingBoxUpdate: () => Promise<SingBoxVersionStatus>;
   rollbackSingBox: () => Promise<ActionResult>;
+  installMihomo: (method: MihomoInstallMethod) => Promise<ActionResult>;
+  checkMihomoUpdate: () => Promise<MihomoVersionStatus>;
+  rollbackMihomo: () => Promise<ActionResult>;
+  controlMihomo: (action: MihomoServiceAction) => Promise<ActionResult>;
+  switchEngine: (targetMode: RuntimeMode) => Promise<ActionResult>;
   saveSchedule: (input: ScheduleSettings) => Promise<ScheduleSettings>;
   disableSchedule: () => Promise<ScheduleSettings>;
   clearHistory: () => Promise<number>;
   cleanOldBackups: () => Promise<{ deletedCount: number; backups: BackupView[] }>;
-  chooseFile: (kind: 'surge-profile' | 'sing-box') => Promise<string | undefined>;
+  chooseFile: (kind: 'surge-profile' | 'sing-box' | 'mihomo') => Promise<string | undefined>;
   confirm: (input: { title: string; message: string; detail?: string }) => Promise<boolean>;
   revealPath: (path: string) => Promise<void>;
+  onInstallProgress: (listener: (event: InstallProgressEvent) => void) => () => void;
 };

@@ -1,9 +1,16 @@
 import { constants } from 'node:fs';
-import { access, readdir, stat } from 'node:fs/promises';
+import { access, chmod, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { join, resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
 
-import type { AddressResolverConfig, CliConfig, CliConfigInput, PolicyGroupTargetMode } from './types/cli-config';
+import type {
+  AddressResolverConfig,
+  CliConfig,
+  CliConfigInput,
+  PolicyGroupTargetMode,
+  RuntimeMode,
+} from './types/cli-config';
 import { pathExists, readJsonFile, writeTextFile } from './utils/fs';
 
 export const CONFIG_FILE_NAME = '.surge-vless-bridge.json';
@@ -118,8 +125,20 @@ export const getDefaultConfig = async (_cwd: string): Promise<CliConfig> => {
   const singBoxBinary = await detectSingBoxBinary();
 
   return {
+    runtimeMode: 'external',
+    runtimeModeConfirmed: false,
+    mihomo: {
+      binary: join(stateDir, 'bin', 'mihomo'),
+      dataDir: join(stateDir, 'mihomo'),
+      controllerHost: '127.0.0.1',
+      controllerPort: 19090,
+      controllerSecret: randomBytes(24).toString('hex'),
+      autoStart: true,
+      logLevel: 'info',
+    },
     subscriptionUrl: '',
     subscriptionUrls: [],
+    subscriptionNames: [],
     vlessNodes: [],
     surgeConfigPath: await detectSurgeConfigPath(),
     singBoxBinary: singBoxBinary.path,
@@ -177,6 +196,46 @@ const resolveDefaultConfigPath = (cwd: string) => {
   return resolve(cwd, CONFIG_FILE_NAME);
 };
 
+const writePrivateJsonAtomically = async (path: string, value: unknown) => {
+  const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  await mkdir(dirname(path), { recursive: true });
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporaryPath, path);
+    await chmod(path, 0o600);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+};
+
+export const persistMihomoControllerSecret = async ({
+  config,
+  configPath,
+}: {
+  config: CliConfig;
+  configPath: string;
+}) => {
+  const raw = (await pathExists(configPath)) ? await readJsonFile<CliConfigInput>(configPath) : {};
+  const storedSecret = raw.mihomo?.controllerSecret?.trim();
+  const controllerSecret = storedSecret || config.mihomo.controllerSecret || randomBytes(24).toString('hex');
+  if (!storedSecret) {
+    await writePrivateJsonAtomically(configPath, {
+      ...raw,
+      mihomo: {
+        ...(raw.mihomo ?? {}),
+        controllerSecret,
+      },
+    });
+  }
+  return {
+    ...config,
+    mihomo: {
+      ...config.mihomo,
+      controllerSecret,
+    },
+  };
+};
+
 const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
   if (!input) {
     return base;
@@ -185,8 +244,16 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
   const definedEntries = Object.entries(input).filter(([, value]) => value !== undefined);
   const sanitizedInput = Object.fromEntries(definedEntries) as CliConfigInput;
   const hasSubscriptionUrls = Array.isArray(sanitizedInput.subscriptionUrls);
-  const normalizedSubscriptionUrls = hasSubscriptionUrls
-    ? sanitizedInput.subscriptionUrls?.filter((url) => typeof url === 'string' && url.trim() !== '')
+  const inputSubscriptionNames = Array.isArray(sanitizedInput.subscriptionNames)
+    ? sanitizedInput.subscriptionNames
+    : [];
+  const normalizedSubscriptions = hasSubscriptionUrls
+    ? sanitizedInput.subscriptionUrls
+        ?.map((url, index) => ({
+          url: typeof url === 'string' ? url.trim() : '',
+          name: typeof inputSubscriptionNames[index] === 'string' ? inputSubscriptionNames[index]!.trim() : '',
+        }))
+        .filter((entry) => entry.url !== '')
     : undefined;
   const hasVlessNodes = Array.isArray(sanitizedInput.vlessNodes);
   const normalizedVlessNodes = hasVlessNodes
@@ -238,11 +305,45 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
     typeof sanitizedInput.udpTestTarget === 'string' && sanitizedInput.udpTestTarget.trim()
       ? sanitizedInput.udpTestTarget.trim()
       : base.udpTestTarget;
+  const runtimeMode: RuntimeMode =
+    sanitizedInput.runtimeMode === 'mihomo' || sanitizedInput.runtimeMode === 'external'
+      ? sanitizedInput.runtimeMode
+      : base.runtimeMode;
+  const runtimeModeConfirmed =
+    sanitizedInput.runtimeModeConfirmed === undefined
+      ? base.runtimeModeConfirmed
+      : Boolean(sanitizedInput.runtimeModeConfirmed);
+  const mihomoInput = sanitizedInput.mihomo;
+  const controllerPort = Number(mihomoInput?.controllerPort);
+  const validLogLevels = new Set(['silent', 'error', 'warning', 'info', 'debug']);
 
   return {
     ...base,
     ...sanitizedInput,
-    subscriptionUrls: normalizedSubscriptionUrls ?? base.subscriptionUrls,
+    runtimeMode,
+    runtimeModeConfirmed,
+    mihomo: {
+      ...base.mihomo,
+      ...(mihomoInput ?? {}),
+      controllerHost: '127.0.0.1',
+      controllerPort:
+        Number.isInteger(controllerPort) && controllerPort >= 1024 && controllerPort <= 65535
+          ? controllerPort
+          : base.mihomo.controllerPort,
+      controllerSecret:
+        typeof mihomoInput?.controllerSecret === 'string' && mihomoInput.controllerSecret.trim()
+          ? mihomoInput.controllerSecret.trim()
+          : base.mihomo.controllerSecret,
+      logLevel:
+        typeof mihomoInput?.logLevel === 'string' && validLogLevels.has(mihomoInput.logLevel)
+          ? (mihomoInput.logLevel as CliConfig['mihomo']['logLevel'])
+          : base.mihomo.logLevel,
+      autoStart: mihomoInput?.autoStart === undefined ? base.mihomo.autoStart : Boolean(mihomoInput.autoStart),
+    },
+    subscriptionUrls: normalizedSubscriptions?.map((entry) => entry.url) ?? base.subscriptionUrls,
+    subscriptionNames:
+      normalizedSubscriptions?.map((entry) => entry.name) ??
+      (base.subscriptionUrls ?? []).map((_, index) => base.subscriptionNames?.[index]?.trim() ?? ''),
     vlessNodes: normalizedVlessNodes ?? base.vlessNodes,
     policyGroupName,
     policyGroupTargets,
@@ -285,8 +386,12 @@ export const loadCliConfig = async ({
   }
 
   const parsed = await readJsonFile<CliConfigInput>(resolvedConfigPath);
+  let config = mergeConfig(mergeConfig(defaults, parsed), overrides);
+  if (config.runtimeMode === 'mihomo' && !parsed.mihomo?.controllerSecret?.trim()) {
+    config = await persistMihomoControllerSecret({ config, configPath: resolvedConfigPath });
+  }
   return {
-    config: mergeConfig(mergeConfig(defaults, parsed), overrides),
+    config,
     configPath: resolvedConfigPath,
     exists: true,
   };
@@ -320,6 +425,9 @@ export const writeExampleConfig = async ({
   const subscriptionUrls = clean(values?.subscriptionUrls);
 
   const example: CliConfigInput = {
+    runtimeMode: defaults.runtimeMode,
+    runtimeModeConfirmed: defaults.runtimeModeConfirmed,
+    mihomo: { ...defaults.mihomo, controllerSecret: '' },
     subscriptionUrls: subscriptionUrls.length ? subscriptionUrls : [''],
     vlessNodes: clean(values?.vlessNodes),
     surgeConfigPath: values?.surgeConfigPath?.trim() || defaults.surgeConfigPath,

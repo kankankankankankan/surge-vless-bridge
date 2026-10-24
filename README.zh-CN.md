@@ -6,9 +6,9 @@
 
 [English README](./README.md) · [更新日志](./CHANGELOG.zh-CN.md)
 
-![Surge VLESS Bridge 桌面应用](./docs/images/surge-vless-bridge-desktop.png)
+![Surge VLESS Bridge 桌面应用](./docs/images/dual-engine-external-1180x780.png)
 
-**让 Surge Mac 支持 VLESS，底层由 sing-box 承接。** 基于 Node.js 的 CLI，把 VLESS 订阅（含 REALITY、XTLS Vision 节点）转换为 Surge Mac 可用的 `external` 外部代理节点。
+**让 Surge Mac 支持 VLESS，并可选择 sing-box External 或 Mihomo 网关。** External 模式保持原有每节点进程，Mihomo 模式使用单个后台进程和回环 SOCKS5 listeners。
 
 Surge Mac 不原生支持 VLESS 协议。该工具自动拉取订阅、为每个节点生成 `sing-box` 配置、并保持 Surge 配置同步更新，让你继续使用 Surge 的规则、策略组和面板来使用 VLESS 节点。
 
@@ -19,7 +19,7 @@ Surge Mac 不原生支持 VLESS 协议。该工具自动拉取订阅、为每个
 
 ## macOS 桌面应用
 
-仓库包含 Electron 桌面界面，可以管理订阅、预览更新、执行同步、检查并修复环境、安装 `sing-box`、配置 DNS、恢复备份和管理 macOS 定时任务。
+仓库包含 Electron 桌面界面，可以管理订阅、切换运行引擎、预览更新、执行同步、检查并修复环境、安装内核、配置 DNS、恢复备份和管理 macOS 定时任务。旧配置继续使用 External 模式。
 
 ```bash
 npm install
@@ -190,8 +190,8 @@ surge-vless-bridge doctor
 | `udpTestEnabled`     | `false`                                | 为启用 UDP 的节点写入 `test-udp`      |
 | `udpTestTarget`      | `"apple.com@8.8.8.8"`                | Surge UDP 测试使用的域名和 IPv4       |
 | `tcpFastOpen`        | `false`                                | 为 sing-box 远程连接开启 TCP Fast Open |
-| `connectTimeoutEnabled` | `false`                             | 使用自定义远程连接超时                 |
-| `connectTimeoutSeconds` | `10`                               | 远程连接超时秒数                       |
+| `connectTimeoutEnabled` | `false`                             | External 模式使用自定义远程连接超时   |
+| `connectTimeoutSeconds` | `10`                               | External 模式的远程连接超时秒数             |
 | `addressResolver`    | 见下方                                 | 为 `addresses=` 解析节点服务器域名    |
 
 游戏、QUIC、语音通话或 UDP DNS 需要经过 VLESS 时，可以开启 `udpRelay`。生成的 sing-box SOCKS 入站支持
@@ -199,7 +199,7 @@ UDP ASSOCIATE。上游节点不支持 UDP，或只需要 TCP 流量时保持关�
 
 开启 `udpTestEnabled` 后，Surge external 节点会增加 `test-udp=域名@IPv4`。该项依赖 `udpRelay`，默认测试目标为 `apple.com@8.8.8.8`。
 
-`tcpFastOpen` 和连接超时属于 sing-box 远程拨号参数。开启后会分别写入 `tcp_fast_open=true` 和 `connect_timeout=秒数s`，不会写入 Surge 参数。
+`tcpFastOpen` 在两种引擎中均可用。自定义连接超时仅用于 External，会向 sing-box outbound 写入 `connect_timeout=秒数s`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，因此使用内核默认值。
 
 `addressResolver.strategy` 可选：
 

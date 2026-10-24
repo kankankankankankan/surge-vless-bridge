@@ -9,13 +9,8 @@ import { listSurgeProfiles, loadCliConfig, resolveConfigPath, writeExampleConfig
 import type { CliConfigInput } from './types/cli-config';
 import { dim, isInteractive, normalizePastedPath, redactUrl, withPrompt, type Ask } from './utils/prompt';
 import { canSelect, selectFromList } from './utils/select';
-import {
-  cleanManagedArtifacts,
-  rebuildSurgeFromLocalConfigs,
-  restoreSurgeProfileBackup,
-  runDoctor,
-  syncSubscriptionToSurge,
-} from './surge';
+import { restoreSurgeProfileBackup } from './surge';
+import { cleanBridge, doctorBridge, rebuildBridge, syncBridge } from './engines';
 
 const REPOSITORY_URL = 'https://github.com/chen86860/surge-vless-bridge';
 
@@ -64,18 +59,18 @@ const version = () => {
   return cachedVersion;
 };
 
-const helpText = () => `Use VLESS subscriptions in Surge Mac, backed by local sing-box.
+const helpText = () => `Use VLESS subscriptions in Surge Mac with a local sing-box External or Mihomo gateway runtime.
 
 Usage:
   surge-vless-bridge <command> [flags]
 
 Commands:
   init       Create a config, asking for the subscription and Surge profile
-  sync       Fetch subscriptions, generate sing-box configs, update Surge
-  rebuild    Rebuild the Surge block from local sing-box configs only
+  sync       Fetch subscriptions, update the active runtime and Surge
+  rebuild    Rebuild the Surge block from active runtime artifacts
   restore    Restore the latest backup, or the one given as an argument
-  clean      Remove generated configs and the managed block from Surge
-  doctor     Check paths, ports and required Surge sections
+  clean      Remove active runtime artifacts and the managed Surge block
+  doctor     Check the active runtime, ports and required Surge sections
   version    Print the version
   help       Print this help
 
@@ -89,6 +84,10 @@ Config flags:
   --group-name <name>        Surge policy group name
   --port-start <number>      First local SOCKS port
   --backup-keep <number>     How many backups to keep
+
+Runtime selection:
+  Set runtimeMode to "external" or "mihomo" in the config file.
+  Mihomo paths, controller port and service settings live under the mihomo object.
 
 Command flags:
   --dry-run                  sync: preview the changes, write nothing
@@ -440,7 +439,7 @@ const main = async () => {
 
   switch (parsed.command) {
     case 'sync': {
-      const result = await syncSubscriptionToSurge(loaded.config, {
+      const result = await syncBridge(loaded.config, {
         dryRun: parsed.options['dry-run'] === true,
       });
 
@@ -454,7 +453,7 @@ const main = async () => {
       break;
     }
     case 'rebuild': {
-      const result = await rebuildSurgeFromLocalConfigs(loaded.config);
+      const result = await rebuildBridge(loaded.config);
       console.log(`Rebuilt ${result.count} nodes from local configs.`);
       console.log(`Backup saved to ${result.backupPath}`);
       break;
@@ -473,13 +472,13 @@ const main = async () => {
         break;
       }
 
-      const result = await cleanManagedArtifacts(loaded.config);
+      const result = await cleanBridge(loaded.config);
       console.log(`Removed ${result.removedConfigs} node config${result.removedConfigs === 1 ? '' : 's'}.`);
       console.log(`Backup saved to ${result.backupPath}`);
       break;
     }
     case 'doctor': {
-      const { failures } = await runDoctor(loaded.config);
+      const { failures } = await doctorBridge(loaded.config);
       if (failures > 0) {
         process.exitCode = 1;
       }

@@ -1,7 +1,19 @@
 {
+  "runtimeMode": "external",
+  "runtimeModeConfirmed": false,
+  "mihomo": {
+    "controllerHost": "127.0.0.1",
+    "controllerPort": 19090,
+    "autoStart": true,
+    "logLevel": "info"
+  },
   "subscriptionUrls": [
     "https://example.com/subscription-a",
     "https://example.com/subscription-b"
+  ],
+  "subscriptionNames": [
+    "Primary",
+    "Backup"
   ],
   "vlessNodes": [
     "vless://uuid@example.com:443?type=tcp&security=reality&pbk=public-key&sid=short-id&fp=chrome&sni=example.com&flow=xtls-rprx-vision#Example"

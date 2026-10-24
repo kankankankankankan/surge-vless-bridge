@@ -143,7 +143,7 @@ const resolveWithDoh = async (server: string, dohEndpoint: string) => {
   return settled.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
 };
 
-const sanitizePolicyName = (tag: string, index: number) => {
+export const sanitizePolicyName = (tag: string, index: number) => {
   const candidate = POLICY_REGEX_FILTER.test(tag) ? tag : `node${index + 1}`;
   const sanitized = candidate
     .replace(/[,\n\r=]/g, ' ')
@@ -157,7 +157,7 @@ type ResolverAttempt = {
   run: () => Promise<string[]>;
 };
 
-const ensureUniquePolicyName = (nodeName: string, seenNames: Map<string, number>) => {
+export const ensureUniquePolicyName = (nodeName: string, seenNames: Map<string, number>) => {
   const previousCount = seenNames.get(nodeName) ?? 0;
   seenNames.set(nodeName, previousCount + 1);
 
@@ -172,7 +172,7 @@ const ensureUniquePolicyName = (nodeName: string, seenNames: Map<string, number>
 // adding a second provider usually keeps the legacy single-URL field, and dropping it silently would
 // remove every node of their original subscription. The legacy field stays first so existing node
 // order, and therefore the assigned local ports, do not shift.
-const getSubscriptionUrls = (config: CliConfig) => {
+export const getSubscriptionUrls = (config: CliConfig) => {
   const urls = [config.subscriptionUrl, ...(config.subscriptionUrls ?? [])];
 
   return [
@@ -182,10 +182,51 @@ const getSubscriptionUrls = (config: CliConfig) => {
   ];
 };
 
-const getConfiguredVlessNodes = (config: CliConfig) =>
+export const getConfiguredVlessNodes = (config: CliConfig) =>
   (config.vlessNodes ?? [])
     .filter((node): node is string => typeof node === 'string' && node.trim() !== '')
     .map((node) => node.trim());
+
+const describeSubscriptionSource = (subscriptionUrl: string) => {
+  try {
+    const url = new URL(subscriptionUrl);
+    return url.protocol === 'data:' ? 'data: URL' : url.origin;
+  } catch {
+    return 'subscription URL';
+  }
+};
+
+export const collectVlessNodes = async (config: CliConfig) => {
+  const subscriptionUrls = getSubscriptionUrls(config);
+  const describeSubscription = (index: number) => `Subscription ${index + 1} of ${subscriptionUrls.length}`;
+  const vlessNodesBySubscription = await Promise.all(
+    subscriptionUrls.map(async (subscriptionUrl, index) => {
+      try {
+        const nodes = await getVlessSubscriptionNodes({
+          subscriptionUrl,
+          requestHeaders: config.requestHeaders,
+        });
+        if (nodes.length === 0) {
+          console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
+        }
+        return nodes;
+      } catch {
+        console.warn(
+          `${describeSubscription(index)} (${describeSubscriptionSource(subscriptionUrl)}) failed and was skipped.`,
+        );
+        return [];
+      }
+    }),
+  );
+
+  const nodes = [
+    ...new Set([...vlessNodesBySubscription.flat(), ...getConfiguredVlessNodes(config)].map((node) => node.trim())),
+  ].filter(Boolean);
+  if (nodes.length === 0) {
+    throw new Error('No VLESS nodes from any configured source; refusing to update the Surge profile.');
+  }
+  return nodes;
+};
 
 const resolveAddresses = async (server: string, resolverConfig: AddressResolverConfig) => {
   if (resolverConfig.strategy === 'off') {
@@ -281,7 +322,7 @@ const buildExternalProxyLine = async ({
   return `${nodeName} = external, exec=${singBoxBinary}, args=run, args=-c, args=${configPath}, local-port=${port}${addressArg}${udpRelayArg}${udpTestArg}`;
 };
 
-const ensureRequiredConfig = (config: CliConfig) => {
+export const ensureRequiredConfig = (config: CliConfig) => {
   if (getSubscriptionUrls(config).length === 0 && getConfiguredVlessNodes(config).length === 0) {
     throw new Error(
       'Missing subscriptionUrl/subscriptionUrls/vlessNodes. Run `surge-vless-bridge init` and fill the config, or pass --subscription-url.',
@@ -307,7 +348,7 @@ const ensureRuntimePaths = async (config: CliConfig) => {
   }
 };
 
-const ensureWritableDirs = async (config: CliConfig) => {
+export const ensureWritableDirs = async (config: CliConfig) => {
   await mkdir(config.outputDir, { recursive: true });
   await mkdir(config.backupDir, { recursive: true });
 };
@@ -893,7 +934,36 @@ const updateProxyBlock = ({
   });
 };
 
-const buildSurgeProfile = async ({
+const updateMihomoProcessRule = ({
+  surgeText,
+  enabled,
+  processName,
+}: {
+  surgeText: string;
+  enabled: boolean;
+  processName?: string;
+}) => {
+  const startMarker = '# surge-vless-bridge mihomo rule start';
+  const endMarker = '# surge-vless-bridge mihomo rule end';
+  const blockPattern = new RegExp(`\\n?${escapeRegExp(startMarker)}[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, 'm');
+  const withoutManagedRule = surgeText.replace(blockPattern, '\n');
+  if (!enabled) return withoutManagedRule;
+
+  const sectionPattern = /(\[Rule\])([\s\S]*?)(?=\n\[|$)/;
+  if (!sectionPattern.test(withoutManagedRule)) {
+    throw new Error('Surge profile is missing the [Rule] section.');
+  }
+  const resolvedProcessName = processName?.trim();
+  if (!resolvedProcessName || /[,\r\n]/.test(resolvedProcessName)) {
+    throw new Error(`Invalid Mihomo process name for Surge rule: ${processName || 'missing'}`);
+  }
+  return withoutManagedRule.replace(sectionPattern, (_match, title: string, body: string) => {
+    const normalizedBody = body.startsWith('\n') ? body : `\n${body}`;
+    return `${title}\n${startMarker}\nPROCESS-NAME,${resolvedProcessName},DIRECT\n${endMarker}${normalizedBody}`;
+  });
+};
+
+export const buildSurgeProfile = async ({
   config,
   proxyLines,
   nodeNames,
@@ -921,11 +991,17 @@ const buildSurgeProfile = async ({
     targetModes: configuredPolicyGroupTargetModes(config),
   });
 
-  const updated = updatePolicyGroupTargets({
+  const withTargets = updatePolicyGroupTargets({
     surgeText: withSelectedTargets,
     policyGroupName: config.policyGroupName,
     targetNames: configuredPolicyGroupExclusions(config),
     action: 'remove',
+  });
+
+  const updated = updateMihomoProcessRule({
+    surgeText: withTargets,
+    enabled: config.runtimeMode === 'mihomo',
+    processName: basename(config.mihomo.binary),
   });
 
   return {
@@ -935,10 +1011,17 @@ const buildSurgeProfile = async ({
   };
 };
 
-const maybeReloadSurge = async (config: CliConfig, surgeText: string) => {
+export const reloadSurgeIfEnabled = async (config: CliConfig, surgeText: string) => {
   if (!config.autoReload) {
     return;
   }
+
+  const { reloaded, via } = await reloadSurgeProfile(surgeText);
+  if (reloaded) console.log(`Surge profile reloaded via ${via}.`);
+};
+
+const maybeReloadSurge = async (config: CliConfig, surgeText: string) => {
+  if (!config.autoReload) return;
 
   const stopped = await stopManagedSingBoxProcesses({
     singBoxBinary: config.singBoxBinary,
@@ -948,10 +1031,7 @@ const maybeReloadSurge = async (config: CliConfig, surgeText: string) => {
     console.log(`Stopped ${stopped.length} managed sing-box process${stopped.length === 1 ? '' : 'es'} before reload.`);
   }
 
-  const { reloaded, via } = await reloadSurgeProfile(surgeText);
-  if (reloaded) {
-    console.log(`Surge profile reloaded via ${via}.`);
-  }
+  await reloadSurgeIfEnabled(config, surgeText);
 };
 
 const generateConfigsFromOutbounds = async ({
@@ -1109,14 +1189,15 @@ export const cleanManagedArtifacts = async (config: CliConfig) => {
     action: 'remove',
   });
 
-  await writeTextFile(config.surgeConfigPath, withoutTargets);
+  const withoutMihomoRule = updateMihomoProcessRule({ surgeText: withoutTargets, enabled: false });
+  await writeTextFile(config.surgeConfigPath, withoutMihomoRule);
 
   const entries = (await readdir(config.outputDir).catch(() => [])).filter(
     (entry) => MANAGED_CONFIG_PATTERN.test(entry) || entry === MANIFEST_FILE_NAME,
   );
   await Promise.all(entries.map((entry) => rm(join(config.outputDir, entry), { force: true })));
 
-  await maybeReloadSurge(config, withoutTargets);
+  await maybeReloadSurge(config, withoutMihomoRule);
 
   return {
     backupPath,
@@ -1129,33 +1210,7 @@ export const syncSubscriptionToSurge = async (config: CliConfig, { dryRun = fals
   await ensureRuntimePaths(config);
   await ensureWritableDirs(config);
 
-  const subscriptionUrls = getSubscriptionUrls(config);
-  const describeSubscription = (index: number) => `Subscription ${index + 1} of ${subscriptionUrls.length}`;
-  const vlessNodesBySubscription = await Promise.all(
-    subscriptionUrls.map(async (subscriptionUrl, index) => {
-      try {
-        return await getVlessSubscriptionNodes({
-          subscriptionUrl,
-          requestHeaders: config.requestHeaders,
-        });
-      } catch (error) {
-        throw new Error(`${describeSubscription(index)}: ${error instanceof Error ? error.message : error}`);
-      }
-    }),
-  );
-  vlessNodesBySubscription.forEach((nodes, index) => {
-    if (nodes.length === 0) {
-      console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
-    }
-  });
-
-  const vlessNodes = [...vlessNodesBySubscription.flat(), ...getConfiguredVlessNodes(config)];
-
-  // Checked across all sources rather than per subscription: with several providers configured, one
-  // expired subscription should not be able to wipe the Surge profile.
-  if (vlessNodes.length === 0) {
-    throw new Error('No VLESS nodes from any configured source; refusing to update the Surge profile.');
-  }
+  const vlessNodes = await collectVlessNodes(config);
 
   if (config.subscriptionOutputPath && !dryRun) {
     await writeTextFile(config.subscriptionOutputPath, `${vlessNodes.join('\n')}\n`);
@@ -1313,9 +1368,9 @@ const listBackups = async (backupDir: string) => {
 
 const findLatestBackup = async (backupDir: string) => (await listBackups(backupDir))[0];
 
-type DoctorLevel = 'ok' | 'warn' | 'fail';
+export type DoctorLevel = 'ok' | 'warn' | 'fail';
 
-type DoctorCheck = {
+export type DoctorCheck = {
   label: string;
   level: DoctorLevel;
   detail: string;
@@ -1343,7 +1398,7 @@ const findPortConflicts = async (portStart: number, count: number) => {
   return conflicts;
 };
 
-export const runDoctor = async (config: CliConfig) => {
+export const runCommonDoctorChecks = async (config: CliConfig) => {
   const subscriptionUrls = getSubscriptionUrls(config);
   const vlessNodes = getConfiguredVlessNodes(config);
   const checks: DoctorCheck[] = [];
@@ -1361,24 +1416,12 @@ export const runDoctor = async (config: CliConfig) => {
     detail: config.surgeConfigPath || 'missing',
   });
 
+  const backupDirExists = await pathExists(config.backupDir);
   checks.push({
-    label: 'singBoxBinary',
-    level: Boolean(config.singBoxBinary) && (await pathExists(config.singBoxBinary)) ? 'ok' : 'fail',
-    detail: config.singBoxBinary || 'missing',
+    label: 'backupDir',
+    level: backupDirExists ? 'ok' : 'warn',
+    detail: backupDirExists ? config.backupDir : `${config.backupDir} (not created yet; run \`sync\`)`,
   });
-
-  // Both directories are created on the first sync, so their absence is expected before then.
-  for (const [label, dir] of [
-    ['outputDir', config.outputDir],
-    ['backupDir', config.backupDir],
-  ] as const) {
-    const exists = await pathExists(dir);
-    checks.push({
-      label,
-      level: exists ? 'ok' : 'warn',
-      detail: exists ? dir : `${dir} (not created yet; run \`sync\`)`,
-    });
-  }
 
   if (surgeConfigExists) {
     const text = await readTextFile(config.surgeConfigPath);
@@ -1391,6 +1434,11 @@ export const runDoctor = async (config: CliConfig) => {
       label: 'proxy-section',
       level: text.includes('[Proxy]') ? 'ok' : 'fail',
       detail: '[Proxy]',
+    });
+    checks.push({
+      label: 'rule-section',
+      level: text.includes('[Rule]') ? 'ok' : 'fail',
+      detail: '[Rule]',
     });
 
     const httpApi = parseHttpApiSettings(text);
@@ -1405,7 +1453,40 @@ export const runDoctor = async (config: CliConfig) => {
     });
   }
 
-  const managedEntries = (await pathExists(config.outputDir))
+  return checks;
+};
+
+export const reportDoctorChecks = (checks: DoctorCheck[]) => {
+  for (const check of checks) {
+    console.log(`${check.level === 'ok' ? 'OK' : check.level === 'warn' ? 'WARN' : 'FAIL'} ${check.label}: ${check.detail}`);
+  }
+
+  const failures = checks.filter((check) => check.level === 'fail').length;
+  const warnings = checks.filter((check) => check.level === 'warn').length;
+  if (failures > 0) {
+    console.error(`\n${failures} problem${failures === 1 ? '' : 's'} found.`);
+  }
+
+  return { checks, failures, warnings };
+};
+
+export const runExternalDoctor = async (config: CliConfig) => {
+  const checks = await runCommonDoctorChecks(config);
+  const binaryIndex = Math.min(2, checks.length);
+  checks.splice(binaryIndex, 0, {
+    label: 'singBoxBinary',
+    level: Boolean(config.singBoxBinary) && (await pathExists(config.singBoxBinary)) ? 'ok' : 'fail',
+    detail: config.singBoxBinary || 'missing',
+  });
+
+  const outputDirExists = await pathExists(config.outputDir);
+  checks.splice(binaryIndex + 1, 0, {
+    label: 'outputDir',
+    level: outputDirExists ? 'ok' : 'warn',
+    detail: outputDirExists ? config.outputDir : `${config.outputDir} (not created yet; run \`sync\`)`,
+  });
+
+  const managedEntries = outputDirExists
     ? await readManagedConfigEntries(config.outputDir).catch(() => [])
     : [];
   if (managedEntries.length > 0) {
@@ -1420,15 +1501,7 @@ export const runDoctor = async (config: CliConfig) => {
     });
   }
 
-  for (const check of checks) {
-    console.log(`${check.level === 'ok' ? 'OK' : check.level === 'warn' ? 'WARN' : 'FAIL'} ${check.label}: ${check.detail}`);
-  }
-
-  const failures = checks.filter((check) => check.level === 'fail').length;
-  const warnings = checks.filter((check) => check.level === 'warn').length;
-  if (failures > 0) {
-    console.error(`\n${failures} problem${failures === 1 ? '' : 's'} found.`);
-  }
-
-  return { checks, failures, warnings };
+  return reportDoctorChecks(checks);
 };
+
+export const runDoctor = runExternalDoctor;

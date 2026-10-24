@@ -6,9 +6,9 @@
 
 [中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
 
-![Surge VLESS Bridge desktop app](./docs/images/surge-vless-bridge-desktop.png)
+![Surge VLESS Bridge desktop app](./docs/images/dual-engine-external-1180x780.png)
 
-**Surge Mac VLESS support, via sing-box.** A Node.js CLI that converts a VLESS subscription — including REALITY and XTLS Vision nodes — into Surge Mac `external` proxy entries backed by local `sing-box` configs.
+**Surge Mac VLESS support with selectable sing-box External and Mihomo gateway runtimes.** External mode keeps the existing per-node process model. Mihomo mode uses one background process with loopback SOCKS5 listeners.
 
 Surge Mac does not natively support the VLESS protocol. This tool bridges the gap: it fetches your subscription, generates a `sing-box` config per node, and keeps your Surge profile updated — so VLESS nodes work seamlessly through Surge's rules, policy groups, and dashboard.
 
@@ -19,9 +19,9 @@ Surge Mac does not natively support the VLESS protocol. This tool bridges the ga
 
 ## macOS desktop app
 
-The Electron desktop app manages subscriptions, previews profile changes, runs syncs, repairs the local
-environment, installs or updates sing-box, configures DNS resolution, restores backups, and creates a
-background macOS schedule.
+The Electron desktop app manages subscriptions, selects the runtime, previews profile changes, runs syncs,
+repairs the local environment, installs or updates either core, restores backups, and creates a background
+macOS schedule. Existing configurations continue to use External mode.
 
 ```bash
 npm install
@@ -194,8 +194,8 @@ subscription that returns no VLESS nodes is reported as a warning rather than fa
 | `udpTestEnabled`     | `false`                                | Add `test-udp` to UDP-enabled external proxies         |
 | `udpTestTarget`      | `"apple.com@8.8.8.8"`                | Hostname and IPv4 address used by Surge UDP tests      |
 | `tcpFastOpen`        | `false`                                | Enable TCP Fast Open for sing-box remote connections   |
-| `connectTimeoutEnabled` | `false`                             | Use a custom remote connection timeout                 |
-| `connectTimeoutSeconds` | `10`                               | Remote connection timeout in seconds                   |
+| `connectTimeoutEnabled` | `false`                             | Use a custom remote connection timeout in External mode |
+| `connectTimeoutSeconds` | `10`                               | External mode remote connection timeout in seconds     |
 | `addressResolver`    | see below                              | How to resolve proxy server domains for `addresses=`   |
 
 Enable `udpRelay` when VLESS should carry UDP traffic used by games, QUIC, voice calls, or UDP DNS.
@@ -204,7 +204,7 @@ does not support UDP or when only TCP traffic is needed.
 
 When `udpTestEnabled` is enabled, external proxy entries include `test-udp=hostname@IPv4`. It requires `udpRelay`; the default target is `apple.com@8.8.8.8`.
 
-`tcpFastOpen` and the custom connection timeout are sing-box dial fields. They emit `tcp_fast_open=true` and `connect_timeout=Ns` in each generated outbound and are not written as Surge parameters.
+`tcpFastOpen` is supported by both runtimes. The custom connection timeout is an External-only sing-box dial field and emits `connect_timeout=Ns` in each generated outbound. Mihomo uses its kernel default because its VLESS proxy schema has no per-proxy `connect-timeout` field.
 
 `addressResolver.strategy` can be:
 

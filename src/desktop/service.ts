@@ -4,17 +4,20 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { Resolver } from 'node:dns/promises';
 import { isIPv4 } from 'node:net';
 
-import { HOME_CONFIG_FILE_PATH, listSurgeProfiles, loadCliConfig } from '../configuration';
 import {
-  cleanManagedArtifacts,
+  HOME_CONFIG_FILE_PATH,
+  listSurgeProfiles,
+  loadCliConfig,
+  persistMihomoControllerSecret,
+} from '../configuration';
+import {
   backupSurgeProfile,
   inspectPolicyGroups,
-  rebuildSurgeFromLocalConfigs,
   restoreSurgeProfileBackup,
-  runDoctor,
-  syncSubscriptionToSurge,
 } from '../surge';
-import type { CliConfigInput } from '../types/cli-config';
+import { cleanBridge, doctorBridge, rebuildBridge, syncBridge } from '../engines';
+import type { CliConfig, CliConfigInput, RuntimeMode } from '../types/cli-config';
+import { assertRuntimeModeConfirmed } from '../runtime-mode';
 import { pathExists, readJsonFile, readTextFile, writeTextFile } from '../utils/fs';
 import {
   compareVersions,
@@ -24,6 +27,20 @@ import {
   installSingBoxWithHomebrew,
   rollbackOfficialSingBox,
 } from './dependencies';
+import {
+  inspectMihomoVersion,
+  installMihomoWithHomebrew,
+  installOfficialMihomo,
+  rollbackOfficialMihomo,
+} from '../mihomo/dependencies';
+import {
+  getMihomoServiceStatus,
+  installMihomoLaunchAgent,
+  restartMihomoLaunchAgent,
+  stopMihomoLaunchAgent,
+} from '../mihomo/launch-agent';
+import { readMihomoNodes } from '../mihomo/sync';
+import type { InstallProgressEvent, InstallProgressReporter } from '../install-progress';
 import { LAUNCH_AGENT_LABEL, LaunchAgentScheduler } from './scheduler';
 import { clearHistory, readHistory, readLogTail, recordActivity } from './storage';
 import type {
@@ -35,6 +52,8 @@ import type {
   RepairableCheck,
   ScheduleSettings,
   SingBoxInstallMethod,
+  MihomoInstallMethod,
+  MihomoServiceAction,
 } from './types';
 
 const ACTION_LABELS: Record<DesktopAction, string> = {
@@ -44,6 +63,22 @@ const ACTION_LABELS: Record<DesktopAction, string> = {
   rebuild: '本地重建',
   restore: '恢复最新备份',
   clean: '清理托管配置',
+};
+
+type DesktopServiceDependencies = {
+  switchSync: typeof syncBridge;
+  readMihomoServiceStatus: typeof getMihomoServiceStatus;
+  installMihomoService: typeof installMihomoLaunchAgent;
+  stopMihomoService: typeof stopMihomoLaunchAgent;
+  writeConfigFile: typeof writeTextFile;
+};
+
+const defaultDependencies: DesktopServiceDependencies = {
+  switchSync: syncBridge,
+  readMihomoServiceStatus: getMihomoServiceStatus,
+  installMihomoService: installMihomoLaunchAgent,
+  stopMihomoService: stopMihomoLaunchAgent,
+  writeConfigFile: writeTextFile,
 };
 
 const uniqueLines = (values: string[]) => [...new Set(values.map((value) => value.trim()).filter(Boolean))];
@@ -95,17 +130,23 @@ export class DesktopService {
   readonly historyPath: string;
   readonly schedulerLogPath: string;
   readonly scheduler: LaunchAgentScheduler;
+  private readonly dependencies: DesktopServiceDependencies;
   private operationRunning = false;
   private latestSingBoxCache?: { version: string; expiresAt: number };
+  private readonly reportInstallProgress?: InstallProgressReporter;
 
   constructor({
     configPath = join(homedir(), HOME_CONFIG_FILE_PATH),
     executablePath,
     scheduledEntryPath,
+    dependencies,
+    onInstallProgress,
   }: {
     configPath?: string;
     executablePath: string;
     scheduledEntryPath: string;
+    dependencies?: Partial<DesktopServiceDependencies>;
+    onInstallProgress?: InstallProgressReporter;
   }) {
     this.configPath = configPath;
     this.stateDir = join(dirname(configPath), 'desktop');
@@ -119,6 +160,12 @@ export class DesktopService {
       executablePath,
       scheduledEntryPath,
     });
+    this.dependencies = { ...defaultDependencies, ...dependencies };
+    this.reportInstallProgress = onInstallProgress;
+  }
+
+  private emitInstallProgress(event: InstallProgressEvent) {
+    this.reportInstallProgress?.(event);
   }
 
   private async loadConfig() {
@@ -127,14 +174,42 @@ export class DesktopService {
 
   private async updateConfig(patch: CliConfigInput) {
     const raw = (await pathExists(this.configPath)) ? await readJsonFile<CliConfigInput>(this.configPath) : {};
-    await writeTextFile(this.configPath, `${JSON.stringify({ ...raw, ...patch }, null, 2)}\n`);
+    await this.dependencies.writeConfigFile(this.configPath, `${JSON.stringify({ ...raw, ...patch }, null, 2)}\n`);
   }
 
-  async saveSources(input: { subscriptionUrls: string[]; vlessNodes: string[] }) {
-    const subscriptionUrls = uniqueLines(input.subscriptionUrls);
+  private async restoreMihomoServiceState(
+    config: CliConfig,
+    status: Awaited<ReturnType<typeof getMihomoServiceStatus>>,
+  ) {
+    if (status.loaded) {
+      await this.dependencies.installMihomoService(config);
+      return;
+    }
+    if (status.installed) {
+      await this.dependencies.installMihomoService(config);
+      await this.dependencies.stopMihomoService();
+      return;
+    }
+    await this.dependencies.stopMihomoService({ uninstall: true });
+  }
+
+  async saveSources(input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) {
+    const seenSubscriptions = new Set<string>();
+    const subscriptions = input.subscriptionUrls
+      .map((value, index) => ({
+        url: value.trim(),
+        name: input.subscriptionNames?.[index]?.trim() ?? '',
+      }))
+      .filter((entry) => {
+        if (!entry.url || seenSubscriptions.has(entry.url)) return false;
+        seenSubscriptions.add(entry.url);
+        return true;
+      });
+    const subscriptionUrls = subscriptions.map((entry) => entry.url);
+    const subscriptionNames = subscriptions.map((entry) => entry.name);
     const vlessNodes = uniqueLines(input.vlessNodes);
     validateSources(subscriptionUrls, vlessNodes);
-    await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, vlessNodes });
+    await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, subscriptionNames, vlessNodes });
     return this.getState();
   }
 
@@ -142,6 +217,7 @@ export class DesktopService {
     const portStart = Number(input.portStart);
     const backupKeep = Number(input.backupKeep);
     const connectTimeoutSeconds = Number(input.connectTimeoutSeconds);
+    const mihomoControllerPort = Number(input.mihomoControllerPort);
     if (!Number.isInteger(portStart) || portStart < 1024 || portStart > 65535) {
       throw new Error('起始端口必须在 1024 到 65535 之间。');
     }
@@ -150,6 +226,12 @@ export class DesktopService {
     }
     if (!Number.isInteger(connectTimeoutSeconds) || connectTimeoutSeconds < 1 || connectTimeoutSeconds > 300) {
       throw new Error('连接超时必须在 1 到 300 秒之间。');
+    }
+    if (!Number.isInteger(mihomoControllerPort) || mihomoControllerPort < 1024 || mihomoControllerPort > 65535) {
+      throw new Error('Mihomo controller 端口必须在 1024 到 65535 之间。');
+    }
+    if (!['silent', 'error', 'warning', 'info', 'debug'].includes(input.mihomoLogLevel)) {
+      throw new Error('Mihomo 日志级别无效。');
     }
 
     const policyGroupName = input.policyGroupName.trim() || 'VLESS';
@@ -205,9 +287,18 @@ export class DesktopService {
       }
     }
 
+    const loaded = await this.loadConfig();
     await this.updateConfig({
       surgeConfigPath: input.surgeConfigPath.trim(),
       singBoxBinary: input.singBoxBinary.trim(),
+      mihomo: {
+        ...loaded.config.mihomo,
+        binary: input.mihomoBinary.trim(),
+        dataDir: input.mihomoDataDir.trim(),
+        controllerPort: mihomoControllerPort,
+        autoStart: Boolean(input.mihomoAutoStart),
+        logLevel: input.mihomoLogLevel,
+      },
       policyGroupName,
       policyGroupTargets,
       policyGroupExclusions,
@@ -263,6 +354,10 @@ export class DesktopService {
     }
   }
 
+  private async countMihomoNodes(config: CliConfig) {
+    return (await readMihomoNodes(config).catch(() => [])).length;
+  }
+
   private async singBoxStatus(binaryPath: string, includeLatest = false) {
     const homebrewPath = await findHomebrew();
     const managedSingBoxPath = join(dirname(this.configPath), 'bin', 'sing-box');
@@ -300,25 +395,74 @@ export class DesktopService {
     return { homebrewPath, managedSingBoxPath, status };
   }
 
+  private async mihomoStatus(binaryPath: string, includeLatest = false) {
+    const homebrewPath = await findHomebrew();
+    const managedMihomoPath = join(dirname(this.configPath), 'bin', 'mihomo');
+    return {
+      homebrewPath,
+      managedMihomoPath,
+      status: await inspectMihomoVersion({
+        binaryPath,
+        managedPath: managedMihomoPath,
+        brewPath: homebrewPath,
+        includeLatest,
+      }),
+    };
+  }
+
   async getState(): Promise<DesktopState> {
     const loaded = await this.loadConfig();
-    const dependency = await this.singBoxStatus(loaded.config.singBoxBinary);
-    const doctorCapture = await captureConsole(() => runDoctor(loaded.config));
-    const profiles = await listSurgeProfiles();
-    const surgeText = loaded.config.surgeConfigPath
-      ? await readTextFile(loaded.config.surgeConfigPath).catch(() => '')
-      : '';
+    const [
+      dependency,
+      mihomoDependency,
+      mihomoService,
+      doctorCapture,
+      profiles,
+      surgeText,
+      nodeCount,
+      backups,
+      history,
+      schedule,
+      schedulerLog,
+    ] = await Promise.all([
+      this.singBoxStatus(loaded.config.singBoxBinary),
+      this.mihomoStatus(loaded.config.mihomo.binary),
+      getMihomoServiceStatus(loaded.config),
+      captureConsole(() => doctorBridge(loaded.config)),
+      listSurgeProfiles(),
+      loaded.config.surgeConfigPath ? readTextFile(loaded.config.surgeConfigPath).catch(() => '') : Promise.resolve(''),
+      loaded.config.runtimeMode === 'mihomo'
+        ? this.countMihomoNodes(loaded.config)
+        : this.countNodes(loaded.config.outputDir),
+      this.listBackups(loaded.config.backupDir),
+      readHistory(this.historyPath),
+      this.scheduler.getSettings(),
+      readLogTail(this.schedulerLogPath),
+    ]);
 
     return {
       configPath: loaded.configPath,
       configExists: loaded.exists,
+      runtimeModeConfirmed: loaded.config.runtimeModeConfirmed,
       config: {
+        runtimeMode: loaded.config.runtimeMode,
         subscriptionUrls: [loaded.config.subscriptionUrl, ...(loaded.config.subscriptionUrls ?? [])].filter(
           (value): value is string => Boolean(value),
         ),
+        subscriptionNames: [
+          ...(loaded.config.subscriptionUrl ? [''] : []),
+          ...(loaded.config.subscriptionUrls ?? []).map(
+            (_, index) => loaded.config.subscriptionNames?.[index]?.trim() ?? '',
+          ),
+        ],
         vlessNodes: loaded.config.vlessNodes ?? [],
         surgeConfigPath: loaded.config.surgeConfigPath,
         singBoxBinary: loaded.config.singBoxBinary,
+        mihomoBinary: loaded.config.mihomo.binary,
+        mihomoDataDir: loaded.config.mihomo.dataDir,
+        mihomoControllerPort: loaded.config.mihomo.controllerPort,
+        mihomoAutoStart: loaded.config.mihomo.autoStart,
+        mihomoLogLevel: loaded.config.mihomo.logLevel,
         policyGroupName: loaded.config.policyGroupName,
         policyGroupTargets: loaded.config.policyGroupTargets,
         policyGroupExclusions: loaded.config.policyGroupExclusions,
@@ -338,17 +482,21 @@ export class DesktopService {
         addressResolverFilterSurgeFakeIp: loaded.config.addressResolver.filterSurgeFakeIp,
       },
       doctor: doctorCapture.result,
-      nodeCount: await this.countNodes(loaded.config.outputDir),
-      backups: (await this.listBackups(loaded.config.backupDir)).slice(0, 20),
-      history: await readHistory(this.historyPath),
-      schedule: await this.scheduler.getSettings(),
-      schedulerLog: await readLogTail(this.schedulerLogPath),
+      nodeCount,
+      backups: backups.slice(0, 20),
+      history,
+      schedule,
+      schedulerLog,
       profiles: profiles.map((profile) => ({ path: profile.path, modifiedAt: new Date(profile.mtimeMs).toISOString() })),
       policyGroups: inspectPolicyGroups({ surgeText, policyGroupName: loaded.config.policyGroupName }),
       environment: {
         homebrewPath: dependency.homebrewPath,
         managedSingBoxPath: dependency.managedSingBoxPath,
+        managedMihomoPath: mihomoDependency.managedMihomoPath,
         singBox: dependency.status,
+        mihomo: mihomoDependency.status,
+        mihomoService,
+        controllerSecretConfigured: Boolean(loaded.config.mihomo.controllerSecret),
       },
     };
   }
@@ -386,16 +534,43 @@ export class DesktopService {
         await this.updateConfig({ surgeConfigPath: profile.path });
         message = '已选择最近使用的 Surge 配置。';
         output = profile.path;
-      } else if (check === 'outputDir' || check === 'backupDir') {
-        const path = check === 'outputDir' ? loaded.config.outputDir : loaded.config.backupDir;
+      } else if (check === 'outputDir' || check === 'backupDir' || check === 'mihomo-data-dir') {
+        const path =
+          check === 'outputDir'
+            ? loaded.config.outputDir
+            : check === 'mihomo-data-dir'
+              ? loaded.config.mihomo.dataDir
+              : loaded.config.backupDir;
         await mkdir(path, { recursive: true });
-        message = check === 'outputDir' ? '节点目录已创建。' : '备份目录已创建。';
+        message =
+          check === 'outputDir'
+            ? '节点目录已创建。'
+            : check === 'mihomo-data-dir'
+              ? 'Mihomo 数据目录已创建。'
+              : '备份目录已创建。';
         output = path;
+      } else if (
+        check === 'mihomo-launch-agent' ||
+        check === 'mihomo-controller' ||
+        check === 'mihomo-listeners'
+      ) {
+        if (!(await pathExists(join(loaded.config.mihomo.dataDir, 'config.yaml')))) {
+          throw new Error('请先执行一次 Mihomo 同步，生成并校验 config.yaml。');
+        }
+        if (check === 'mihomo-launch-agent') {
+          await installMihomoLaunchAgent(loaded.config);
+          message = 'Mihomo LaunchAgent 已安装并启动。';
+        } else {
+          await restartMihomoLaunchAgent(loaded.config);
+          message = check === 'mihomo-controller' ? 'Mihomo 已重启，正在重新连接 Controller。' : 'Mihomo 已重启，listener 已重建。';
+        }
+        output = message;
       } else {
         if (!loaded.config.surgeConfigPath || !(await pathExists(loaded.config.surgeConfigPath))) {
           throw new Error('请先选择有效的 Surge 配置文件。');
         }
-        const section = check === 'proxy-section' ? '[Proxy]' : '[Proxy Group]';
+        const section =
+          check === 'proxy-section' ? '[Proxy]' : check === 'rule-section' ? '[Rule]' : '[Proxy Group]';
         const source = await readTextFile(loaded.config.surgeConfigPath);
         if (source.includes(section)) {
           message = `${section} 已存在。`;
@@ -442,8 +617,12 @@ export class DesktopService {
       const before = await this.singBoxStatus(loaded.config.singBoxBinary);
       const result =
         method === 'direct'
-          ? await installOfficialSingBox(join(dirname(this.configPath), 'bin'), loaded.config.outputDir)
-          : await installSingBoxWithHomebrew();
+          ? await installOfficialSingBox(
+              join(dirname(this.configPath), 'bin'),
+              loaded.config.outputDir,
+              (event) => this.emitInstallProgress(event),
+            )
+          : await installSingBoxWithHomebrew((event) => this.emitInstallProgress(event));
       await this.updateConfig({ singBoxBinary: result.path });
       this.latestSingBoxCache = undefined;
       activityAction = before.status.installed ? 'update-sing-box' : 'install-sing-box';
@@ -454,9 +633,18 @@ export class DesktopService {
         message,
         output: result.output,
       });
+      this.emitInstallProgress({
+        target: 'sing-box',
+        method,
+        phase: 'complete',
+        message,
+        detail: result.path,
+        percent: 100,
+      });
       return { success: true, message, output: result.output };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.emitInstallProgress({ target: 'sing-box', method, phase: 'failed', message, detail: message });
       await recordActivity(this.historyPath, {
         action: activityAction,
         success: false,
@@ -502,6 +690,157 @@ export class DesktopService {
     }
   }
 
+  async checkMihomoUpdate() {
+    const loaded = await this.loadConfig();
+    return (await this.mihomoStatus(loaded.config.mihomo.binary, true)).status;
+  }
+
+  async installMihomo(method: MihomoInstallMethod): Promise<ActionResult> {
+    if (this.operationRunning) return { success: false, message: '已有一个任务正在执行。', output: '' };
+    this.operationRunning = true;
+    let activityAction: 'install-mihomo' | 'update-mihomo' = 'install-mihomo';
+    try {
+      const loaded = await this.loadConfig();
+      const before = await this.mihomoStatus(loaded.config.mihomo.binary);
+      const result =
+        method === 'direct'
+          ? await installOfficialMihomo(join(dirname(this.configPath), 'bin'), (event) => this.emitInstallProgress(event))
+          : await installMihomoWithHomebrew((event) => this.emitInstallProgress(event));
+      await this.updateConfig({ mihomo: { ...loaded.config.mihomo, binary: result.path } });
+      activityAction = before.status.installed ? 'update-mihomo' : 'install-mihomo';
+      const message = before.status.installed ? `Mihomo 已更新到 ${result.version}。` : `Mihomo ${result.version} 已安装。`;
+      await recordActivity(this.historyPath, { action: activityAction, success: true, message, output: result.output });
+      this.emitInstallProgress({
+        target: 'mihomo',
+        method,
+        phase: 'complete',
+        message,
+        detail: result.path,
+        percent: 100,
+      });
+      return { success: true, message, output: result.output };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emitInstallProgress({ target: 'mihomo', method, phase: 'failed', message, detail: message });
+      await recordActivity(this.historyPath, { action: activityAction, success: false, message, output: message });
+      return { success: false, message, output: message };
+    } finally {
+      this.operationRunning = false;
+    }
+  }
+
+  async rollbackMihomo(): Promise<ActionResult> {
+    if (this.operationRunning) return { success: false, message: '已有一个任务正在执行。', output: '' };
+    this.operationRunning = true;
+    try {
+      const result = await rollbackOfficialMihomo(join(dirname(this.configPath), 'bin'));
+      const loaded = await this.loadConfig();
+      await this.updateConfig({ mihomo: { ...loaded.config.mihomo, binary: result.path } });
+      if (loaded.config.runtimeMode === 'mihomo') await restartMihomoLaunchAgent({ ...loaded.config, mihomo: { ...loaded.config.mihomo, binary: result.path } });
+      const message = `Mihomo 已回退到 ${result.version}。`;
+      await recordActivity(this.historyPath, { action: 'rollback-mihomo', success: true, message, output: result.output });
+      return { success: true, message, output: result.output };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await recordActivity(this.historyPath, { action: 'rollback-mihomo', success: false, message, output: message });
+      return { success: false, message, output: message };
+    } finally {
+      this.operationRunning = false;
+    }
+  }
+
+  async controlMihomo(action: MihomoServiceAction): Promise<ActionResult> {
+    if (this.operationRunning) return { success: false, message: '已有一个任务正在执行。', output: '' };
+    this.operationRunning = true;
+    try {
+      const loaded = await this.loadConfig();
+      if (action === 'stop') await stopMihomoLaunchAgent();
+      else if (action === 'restart') await restartMihomoLaunchAgent(loaded.config);
+      else await installMihomoLaunchAgent(loaded.config);
+      const message = action === 'stop' ? 'Mihomo 后台服务已停止。' : action === 'restart' ? 'Mihomo 后台服务已重启。' : 'Mihomo 后台服务已启动。';
+      await recordActivity(this.historyPath, {
+        action: action === 'stop' ? 'stop-mihomo' : 'start-mihomo',
+        success: true,
+        message,
+        output: message,
+      });
+      return { success: true, message, output: message };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, message, output: message };
+    } finally {
+      this.operationRunning = false;
+    }
+  }
+
+  async switchEngine(targetMode: RuntimeMode): Promise<ActionResult> {
+    if (this.operationRunning) return { success: false, message: '已有一个任务正在执行。', output: '' };
+    this.operationRunning = true;
+    const loaded = await this.loadConfig();
+    if (loaded.config.runtimeMode === targetMode && loaded.config.runtimeModeConfirmed) {
+      this.operationRunning = false;
+      return { success: true, message: '当前已经使用该运行引擎。', output: '' };
+    }
+    if (loaded.config.runtimeMode === 'external' && targetMode === 'external') {
+      try {
+        await this.updateConfig({ runtimeMode: 'external', runtimeModeConfirmed: true });
+        const message = '已确认使用 sing-box External。';
+        await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message });
+        return { success: true, message, output: message };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await recordActivity(this.historyPath, { action: 'switch-engine', success: false, message, output: message });
+        return { success: false, message, output: message };
+      } finally {
+        this.operationRunning = false;
+      }
+    }
+    const originalConfigExists = await pathExists(loaded.configPath);
+    const originalConfigText = originalConfigExists ? await readTextFile(loaded.configPath) : undefined;
+    const originalSurgeText = await readTextFile(loaded.config.surgeConfigPath);
+    const originalMihomoStatus = await this.dependencies.readMihomoServiceStatus(loaded.config);
+    try {
+      const baseConfig =
+        targetMode === 'mihomo'
+          ? await persistMihomoControllerSecret({ config: loaded.config, configPath: loaded.configPath })
+          : loaded.config;
+      const targetConfig: CliConfig = { ...baseConfig, runtimeMode: targetMode, runtimeModeConfirmed: false };
+      await this.dependencies.switchSync(targetConfig, { dryRun: true });
+      if (targetMode === 'external') {
+        await this.dependencies.stopMihomoService();
+      }
+      const result = await this.dependencies.switchSync(targetConfig);
+      await this.updateConfig({ runtimeMode: targetMode, runtimeModeConfirmed: true, mihomo: targetConfig.mihomo });
+      if (targetMode === 'external') await this.dependencies.stopMihomoService({ uninstall: true });
+      const message = `运行引擎已切换为 ${targetMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}。`;
+      await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message, count: result.count });
+      return { success: true, message, output: message, count: result.count };
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      await writeTextFile(loaded.config.surgeConfigPath, originalSurgeText).catch((rollbackError) => {
+        rollbackErrors.push(`Surge: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`);
+      });
+      if (originalConfigText === undefined) {
+        await rm(loaded.configPath, { force: true }).catch((rollbackError) => {
+          rollbackErrors.push(`配置: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`);
+        });
+      } else {
+        await this.dependencies.writeConfigFile(loaded.configPath, originalConfigText).catch((rollbackError) => {
+          rollbackErrors.push(`配置: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`);
+        });
+      }
+      await this.restoreMihomoServiceState(loaded.config, originalMihomoStatus).catch((rollbackError) => {
+        rollbackErrors.push(`Mihomo 服务: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`);
+      });
+      const cause = error instanceof Error ? error.message : String(error);
+      const message = rollbackErrors.length > 0 ? `${cause}；回滚未完整完成：${rollbackErrors.join('；')}` : cause;
+      await recordActivity(this.historyPath, { action: 'switch-engine', success: false, message, output: message });
+      return { success: false, message, output: message };
+    } finally {
+      this.operationRunning = false;
+    }
+  }
+
   async runAction(action: DesktopAction): Promise<ActionResult> {
     if (this.operationRunning) {
       return { success: false, message: '已有一个任务正在执行。', output: '' };
@@ -511,20 +850,23 @@ export class DesktopService {
     const label = ACTION_LABELS[action];
     try {
       const loaded = await this.loadConfig();
+      if (action !== 'doctor' && !loaded.config.runtimeModeConfirmed) {
+        assertRuntimeModeConfirmed(loaded.config);
+      }
       const captured = await captureConsole(async () => {
         switch (action) {
           case 'doctor':
-            return runDoctor(loaded.config);
+            return doctorBridge(loaded.config);
           case 'preview':
-            return syncSubscriptionToSurge(loaded.config, { dryRun: true });
+            return syncBridge(loaded.config, { dryRun: true });
           case 'sync':
-            return syncSubscriptionToSurge(loaded.config);
+            return syncBridge(loaded.config);
           case 'rebuild':
-            return rebuildSurgeFromLocalConfigs(loaded.config);
+            return rebuildBridge(loaded.config);
           case 'restore':
             return restoreSurgeProfileBackup({ config: loaded.config });
           case 'clean':
-            return cleanManagedArtifacts(loaded.config);
+            return cleanBridge(loaded.config);
         }
       });
       const result = captured.result as { count?: number; preview?: ActionResult['preview'] } | string;
@@ -566,7 +908,8 @@ export class DesktopService {
   async saveSchedule(input: ScheduleSettings) {
     if (input.enabled) {
       const loaded = await this.loadConfig();
-      const doctor = await captureConsole(() => runDoctor(loaded.config));
+      assertRuntimeModeConfirmed(loaded.config);
+      const doctor = await captureConsole(() => doctorBridge(loaded.config));
       if (doctor.result.failures > 0) {
         throw new Error(`请先处理环境检查中的 ${doctor.result.failures} 项问题，再启用定时任务。`);
       }

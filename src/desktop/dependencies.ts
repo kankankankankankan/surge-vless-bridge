@@ -5,6 +5,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  downloadResponseBuffer,
+  runStreamingCommand,
+  type InstallProgressReporter,
+} from '../install-progress';
 import { pathExists } from '../utils/fs';
 
 const execFileAsync = promisify(execFile);
@@ -110,7 +115,7 @@ export const getLatestRelease = async () => {
   return (await response.json()) as GithubRelease;
 };
 
-const downloadAsset = async (asset: ReleaseAsset) => {
+const downloadAsset = async (asset: ReleaseAsset, reportProgress?: InstallProgressReporter) => {
   const response = await fetch(asset.browser_download_url, {
     headers: { 'user-agent': 'surge-vless-bridge' },
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
@@ -119,11 +124,41 @@ const downloadAsset = async (asset: ReleaseAsset) => {
     throw new Error(`下载 sing-box 失败：HTTP ${response.status}`);
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer());
+  let lastPercent = -1;
+  let lastUpdate = 0;
+  const bytes = await downloadResponseBuffer({
+    response,
+    expectedSize: asset.size,
+    onProgress: (receivedBytes, totalBytes) => {
+      const percent = Math.min(60, 8 + Math.round((receivedBytes / Math.max(1, totalBytes)) * 52));
+      const now = Date.now();
+      if (percent === lastPercent && now - lastUpdate < 250) return;
+      lastPercent = percent;
+      lastUpdate = now;
+      reportProgress?.({
+        target: 'sing-box',
+        method: 'direct',
+        phase: 'downloading',
+        message: '正在下载 sing-box',
+        detail: asset.name,
+        percent,
+        receivedBytes,
+        totalBytes,
+      });
+    },
+  });
   if (bytes.length !== asset.size) {
     throw new Error(`下载大小不一致，期望 ${asset.size} 字节，实际 ${bytes.length} 字节。`);
   }
 
+  reportProgress?.({
+    target: 'sing-box',
+    method: 'direct',
+    phase: 'verifying',
+    message: '正在校验下载文件',
+    detail: '核对文件大小与 SHA-256',
+    percent: 64,
+  });
   const actualDigest = createHash('sha256').update(bytes).digest('hex');
   const expectedDigest = asset.digest!.slice('sha256:'.length);
   if (actualDigest !== expectedDigest) {
@@ -222,10 +257,19 @@ export const inspectSingBoxVersion = async ({
 export const installOfficialSingBox = async (
   installDir: string,
   outputDir: string,
+  reportProgress?: InstallProgressReporter,
 ): Promise<SingBoxInstallResult> => {
+  reportProgress?.({
+    target: 'sing-box',
+    method: 'direct',
+    phase: 'preparing',
+    message: '正在读取官方稳定版',
+    detail: 'SagerNet/sing-box',
+    percent: 3,
+  });
   const release = await getLatestRelease();
   const asset = selectOfficialAsset(release, process.arch);
-  const archiveBytes = await downloadAsset(asset);
+  const archiveBytes = await downloadAsset(asset, reportProgress);
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'surge-vless-sing-box-'));
 
   try {
@@ -233,6 +277,14 @@ export const installOfficialSingBox = async (
     const extractedPath = join(temporaryRoot, 'extracted');
     await writeFile(archivePath, archiveBytes);
     await mkdir(extractedPath);
+    reportProgress?.({
+      target: 'sing-box',
+      method: 'direct',
+      phase: 'extracting',
+      message: '正在解压官方发布包',
+      detail: asset.name,
+      percent: 72,
+    });
     await execFileAsync('/usr/bin/tar', ['-xzf', archivePath, '-C', extractedPath], {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
@@ -247,10 +299,26 @@ export const installOfficialSingBox = async (
     const targetPath = join(installDir, 'sing-box');
     const nextPath = join(installDir, 'sing-box.next');
     const previousPath = join(installDir, 'sing-box.previous');
+    reportProgress?.({
+      target: 'sing-box',
+      method: 'direct',
+      phase: 'installing',
+      message: '正在安装 sing-box',
+      detail: `目标位置：${targetPath}`,
+      percent: 82,
+    });
     await rm(nextPath, { force: true });
     await copyFile(sourcePath, nextPath);
     await chmod(nextPath, 0o755);
     const version = await readNormalizedVersion(nextPath);
+    reportProgress?.({
+      target: 'sing-box',
+      method: 'direct',
+      phase: 'validating',
+      message: '正在验证新版本',
+      detail: '检查现有节点配置兼容性',
+      percent: 92,
+    });
     await validateManagedConfigs(nextPath, outputDir);
     const previousVersion = (await pathExists(targetPath)) ? await readNormalizedVersion(targetPath).catch(() => undefined) : undefined;
     if ((await pathExists(targetPath)) && previousVersion !== version) {
@@ -269,7 +337,16 @@ export const installOfficialSingBox = async (
   }
 };
 
-export const installSingBoxWithHomebrew = async (): Promise<SingBoxInstallResult> => {
+export const installSingBoxWithHomebrew = async (
+  reportProgress?: InstallProgressReporter,
+): Promise<SingBoxInstallResult> => {
+  reportProgress?.({
+    target: 'sing-box',
+    method: 'homebrew',
+    phase: 'preparing',
+    message: '正在检查 Homebrew',
+    percent: 5,
+  });
   const brewPath = await findHomebrew();
   if (!brewPath) {
     throw new Error('没有找到 Homebrew。可以选择“下载官方版”，或先安装 Homebrew。');
@@ -287,11 +364,35 @@ export const installSingBoxWithHomebrew = async (): Promise<SingBoxInstallResult
     installed = false;
   }
 
-  const result = await execFileAsync(brewPath, [installed ? 'upgrade' : 'install', 'sing-box'], {
-    encoding: 'utf8',
+  reportProgress?.({
+    target: 'sing-box',
+    method: 'homebrew',
+    phase: 'installing',
+    message: installed ? '正在通过 Homebrew 更新 sing-box' : '正在通过 Homebrew 安装 sing-box',
+    detail: '等待 Homebrew 返回安装步骤',
+    percent: 18,
+    indeterminate: true,
+  });
+  let latestDetail = '';
+  const result = await runStreamingCommand({
+    file: brewPath,
+    args: [installed ? 'upgrade' : 'install', 'sing-box'],
     env: commandEnvironment(),
     timeout: INSTALL_TIMEOUT_MS,
-    maxBuffer: 5 * 1024 * 1024,
+    onLine: (line) => {
+      latestDetail = line;
+      const downloading = /download|fetch|bottle/i.test(line);
+      const linking = /link|cleanup|caveat/i.test(line);
+      reportProgress?.({
+        target: 'sing-box',
+        method: 'homebrew',
+        phase: downloading ? 'downloading' : 'installing',
+        message: downloading ? 'Homebrew 正在下载 sing-box' : 'Homebrew 正在安装 sing-box',
+        detail: line,
+        percent: linking ? 84 : downloading ? 42 : 68,
+        indeterminate: true,
+      });
+    },
   });
   const prefix = (
     await execFileAsync(brewPath, ['--prefix'], {
@@ -304,6 +405,14 @@ export const installSingBoxWithHomebrew = async (): Promise<SingBoxInstallResult
     throw new Error(`Homebrew 已完成，但没有找到 ${binaryPath}。`);
   }
 
+  reportProgress?.({
+    target: 'sing-box',
+    method: 'homebrew',
+    phase: 'validating',
+    message: '正在验证 Homebrew 安装结果',
+    detail: latestDetail || binaryPath,
+    percent: 94,
+  });
   return {
     path: binaryPath,
     version: await readNormalizedVersion(binaryPath),
