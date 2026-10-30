@@ -35,10 +35,12 @@ try {
       {
         runtimeMode: 'external',
         runtimeModeConfirmed: true,
-        subscriptionUrls: [],
-        vlessNodes: [
-          'vless://00000000-0000-4000-8000-000000000001@example.com:443?encryption=none#Scheduled%20Smoke',
-        ],
+        subscriptionUrls: [`data:application/json;base64,${Buffer.from(JSON.stringify({ proxies: [{
+          name: 'Scheduled Smoke', type: 'vless', server: 'example.com', port: 443,
+          uuid: '00000000-0000-4000-8000-000000000001', tls: true, network: 'ws',
+          'ws-opts': { path: '/smoke', headers: { Host: 'cdn.example.com' } },
+        }] })).toString('base64')}`],
+        vlessNodes: [],
         surgeConfigPath: profilePath,
         singBoxBinary: '/usr/bin/true',
         outputDir: join(root, 'nodes'),
@@ -69,6 +71,10 @@ try {
   }
   if (!profile.includes('udp-relay=true')) {
     throw new Error('Packaged scheduler did not preserve the UDP relay setting.');
+  }
+  const node = JSON.parse(await readFile(join(root, 'nodes', 'sing-box[2081].json'), 'utf8')).outbounds[0];
+  if (node.transport?.path !== '/smoke' || node.transport?.headers?.Host !== 'cdn.example.com') {
+    throw new Error('Packaged subscription parser did not preserve the Clash WS options.');
   }
   if (history[0]?.action !== 'scheduled-sync' || history[0]?.success !== true) {
     throw new Error('Packaged scheduler did not write a successful history entry.');

@@ -57,7 +57,7 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
     outbound.tls = {
       enabled: true,
       insecure: toBoolean(insecure),
-      alpn: ['http/1.1'],
+      alpn: params.has('alpn') ? (params.get('alpn') ?? '').split(',').filter(Boolean) : ['http/1.1'],
     };
 
     if (sni) {
@@ -97,6 +97,14 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
       outbound.transport.headers = {
         Host: hostHeader,
       };
+    }
+    if (params.has('ed')) {
+      const earlyData = Number(params.get('ed'));
+      if (!Number.isInteger(earlyData) || earlyData < 0) {
+        throw new Error(`Invalid WebSocket early data at index ${index + 1}.`);
+      }
+      outbound.transport.max_early_data = earlyData;
+      outbound.transport.early_data_header_name = params.get('eh') ?? '';
     }
   }
 

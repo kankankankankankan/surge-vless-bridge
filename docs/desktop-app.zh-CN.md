@@ -35,7 +35,9 @@
 
 订阅和直接节点使用逐项列表管理，支持单项添加、删除和一次粘贴多行。订阅响应支持 VLESS URL 列表、Base64 编码的 URL 列表，以及包含 `proxies` 的 Clash/Mihomo YAML 或 JSON（包括 Base64 编码的 Clash 配置）。来源发生修改后，界面会标记为未保存，并在保存前阻止预览和同步。
 
-如果服务商使用真正的 AES、ChaCha 或自定义加密，Clash 客户端通常依靠服务商内置的解密方式或密钥才能读取，程序无法仅凭订阅地址通用解密；这类来源会在执行输出中显示响应格式或解码原因。
+Base64 属于编码，可以自动识别。需要密钥或专用解密流程的订阅暂不支持，程序会报告无法识别的内容，不会将其直接认定为没有 VLESS。若配置仅通过 `proxy-providers` 引用节点，请填写对应 provider 的订阅地址。
+
+Clash 导入只提取 `proxies` 中的 VLESS 节点，支持 TCP、WS、gRPC 和 HTTP Upgrade，以及 TLS、Reality、SNI、指纹、ALPN 和 WS early data。规则、DNS、端口及其他协议不随订阅导入。HTTP/H2/XHTTP、ECH、证书固定、自定义 WS 请求头等尚未映射的参数会明确报错，避免悄悄丢弃连接所需字段。
 
 预览确认层会显示节点总数、新增和移除配置数量、Surge 配置是否变化、VLESS 策略组、批量加入的目标组、配置路径以及每个节点使用的本地端口。
 

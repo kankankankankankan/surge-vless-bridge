@@ -20,6 +20,8 @@ export type SingBoxTransport = {
   host?: string;
   headers?: Record<string, string>;
   service_name?: string;
+  max_early_data?: number;
+  early_data_header_name?: string;
 };
 
 export type SingBoxVlessOutbound = {

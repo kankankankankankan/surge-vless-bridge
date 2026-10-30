@@ -8,6 +8,7 @@ import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { getVlessSubscriptionNodes } from './parse';
+import { SubscriptionError } from './utils/subscription-error';
 import type { AddressResolverConfig, CliConfig, PolicyGroupTargetMode } from './types/cli-config';
 import type { SingBoxVlessOutbound } from './types/sing-box-vless-outbound';
 import { parseTemplate } from './utils/parse-template';
@@ -198,6 +199,7 @@ const describeSubscriptionSource = (subscriptionUrl: string) => {
 
 export const collectVlessNodes = async (config: CliConfig) => {
   const subscriptionUrls = getSubscriptionUrls(config);
+  const failures: string[] = [];
   const describeSubscription = (index: number) => `Subscription ${index + 1} of ${subscriptionUrls.length}`;
   const vlessNodesBySubscription = await Promise.all(
     subscriptionUrls.map(async (subscriptionUrl, index) => {
@@ -207,13 +209,15 @@ export const collectVlessNodes = async (config: CliConfig) => {
           requestHeaders: config.requestHeaders,
         });
         if (nodes.length === 0) {
+          failures[index] = `订阅 ${index + 1}：已识别订阅，但没有 VLESS 节点。`;
           console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
         }
         return nodes;
       } catch (error) {
-        const detail = error instanceof Error ? `: ${error.message}` : '';
+        const detail = error instanceof SubscriptionError ? error.message : '订阅读取失败。';
+        failures[index] = `订阅 ${index + 1}：${detail}`;
         console.warn(
-          `${describeSubscription(index)} (${describeSubscriptionSource(subscriptionUrl)}) failed and was skipped${detail}.`,
+          `${describeSubscription(index)} (${describeSubscriptionSource(subscriptionUrl)}) failed and was skipped: ${detail}`,
         );
         return [];
       }
@@ -224,7 +228,7 @@ export const collectVlessNodes = async (config: CliConfig) => {
     ...new Set([...vlessNodesBySubscription.flat(), ...getConfiguredVlessNodes(config)].map((node) => node.trim())),
   ].filter(Boolean);
   if (nodes.length === 0) {
-    throw new Error('No VLESS nodes from any configured source; refusing to update the Surge profile.');
+    throw new Error(['No VLESS nodes from any configured source; refusing to update the Surge profile.', ...failures.filter(Boolean)].join('\n'));
   }
   return nodes;
 };

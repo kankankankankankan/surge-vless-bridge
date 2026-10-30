@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [1.6.3] - 2026-10-31
+
+### Fixed
+
+- Import VLESS nodes from Clash/Mihomo YAML or JSON, including Base64-encoded configurations, while retaining existing link subscriptions.
+- Preserve TLS/Reality, ALPN, WS early data, IPv6, and names; map HTTP Upgrade using Mihomo's WS options.
+- Report safe per-source diagnostics, unsupported transport options, and provider-only configurations without logging credentials or response bodies.
+
 ## [1.6.1] - 2026-10-31
 
 ### Added

@@ -20,6 +20,10 @@ const transportOptions = (outbound: SingBoxVlessOutbound) => {
       'ws-opts': {
         path: transport.path ?? '/',
         ...(transport.headers ? { headers: transport.headers } : {}),
+        ...(transport.max_early_data !== undefined ? {
+          'max-early-data': transport.max_early_data,
+          'early-data-header-name': transport.early_data_header_name ?? '',
+        } : {}),
       },
     };
   }
@@ -31,10 +35,11 @@ const transportOptions = (outbound: SingBoxVlessOutbound) => {
   }
   if (transport.type === 'httpupgrade') {
     return {
-      network: 'httpupgrade',
-      'httpupgrade-opts': {
+      network: 'ws',
+      'ws-opts': {
         path: transport.path ?? '/',
-        host: transport.host ?? outbound.server,
+        headers: { Host: transport.host ?? outbound.server },
+        'v2ray-http-upgrade': true,
       },
     };
   }
@@ -58,6 +63,7 @@ export const mapVlessToMihomoProxy = (
   ...(outbound.tls?.enabled
     ? {
         tls: true,
+        ...(outbound.tls.alpn ? { alpn: outbound.tls.alpn } : {}),
         ...(outbound.tls.server_name ? { servername: outbound.tls.server_name } : {}),
         ...(outbound.tls.insecure ? { 'skip-cert-verify': true } : {}),
         ...(outbound.tls.utls?.fingerprint ? { 'client-fingerprint': outbound.tls.utls.fingerprint } : {}),

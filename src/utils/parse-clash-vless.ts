@@ -1,127 +1,131 @@
-import { parse as parseYaml } from 'yaml';
+import { parseDocument } from 'yaml';
+import { SubscriptionError } from './subscription-error';
 
-type ClashProxy = {
-  name?: unknown;
-  type?: unknown;
-  server?: unknown;
-  port?: unknown;
-  uuid?: unknown;
-  tls?: unknown;
-  servername?: unknown;
-  sni?: unknown;
-  'skip-cert-verify'?: unknown;
-  flow?: unknown;
-  network?: unknown;
-  'client-fingerprint'?: unknown;
-  'packet-encoding'?: unknown;
-  'reality-opts'?: {
-    'public-key'?: unknown;
-    'short-id'?: unknown;
+const record = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const string = (value: unknown) => typeof value === 'string' ? value : '';
+const enabled = (value: unknown) => value === true || value === 'true' || value === 1;
+
+const clashProxyToVless = (proxy: Record<string, unknown>, index: number): string => {
+  const fail = (reason: string): never => {
+    throw new SubscriptionError(`Clash 第 ${index + 1} 个节点：${reason}`);
   };
-  'ws-opts'?: {
-    path?: unknown;
-    headers?: Record<string, unknown>;
-  };
-  'grpc-opts'?: {
-    'grpc-service-name'?: unknown;
-    'service-name'?: unknown;
-  };
-  'http-opts'?: {
-    path?: unknown;
-    headers?: Record<string, unknown>;
-  };
-};
-
-const asString = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
-
-const asBoolean = (value: unknown) => value === true || value === 'true' || value === 1;
-
-const firstHeader = (headers: Record<string, unknown> | undefined, names: string[]) => {
-  if (!headers) return '';
-  for (const name of names) {
-    const value = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
-    const result = asString(value);
-    if (result) return result;
-  }
-  return '';
-};
-
-const encoded = (value: string) => encodeURIComponent(value);
-
-const formatServer = (server: string) => (server.includes(':') && !server.startsWith('[') ? `[${server}]` : server);
-
-const clashProxyToVless = (proxy: ClashProxy) => {
-  const name = asString(proxy.name);
-  const server = asString(proxy.server);
-  const uuid = asString(proxy.uuid);
+  const server = string(proxy.server).trim();
+  const uuid = string(proxy.uuid).trim();
   const port = Number(proxy.port);
-  if (!server || !uuid || !Number.isInteger(port) || port < 1 || port > 65535) return undefined;
-
-  const params = new URLSearchParams();
+  if (!server || !uuid || !Number.isInteger(port) || port < 1 || port > 65535) {
+    fail('缺少有效的 server、port 或 uuid。');
+  }
+  let url: URL;
+  try {
+    url = new URL(`vless://${server.includes(':') && !server.startsWith('[') ? `[${server}]` : server}:${port}`);
+    if (url.username || url.password || url.pathname || url.search || url.hash) fail('server 格式无效。');
+  } catch {
+    return fail('server 格式无效。');
+  }
+  url.username = encodeURIComponent(uuid);
+  url.hash = encodeURIComponent(string(proxy.name));
+  const params = url.searchParams;
   params.set('encryption', 'none');
 
-  const reality = proxy['reality-opts'];
-  const publicKey = asString(reality?.['public-key']);
-  const shortId = asString(reality?.['short-id']);
+  // These options cannot be represented by the shared sing-box/Mihomo node model.
+  for (const key of ['encryption', 'fingerprint', 'certificate', 'private-key', 'name-cert-verify', 'dialer-proxy']) {
+    if (proxy[key] && proxy[key] !== 'none') fail(`暂不支持 ${key}，未转换此订阅。`);
+  }
+  for (const key of ['ech-opts', 'shadow-tls-opts', 'restls-opts', 'jls-opts']) {
+    if (Object.keys(record(proxy[key])).length) fail(`暂不支持 ${key}，未转换此订阅。`);
+  }
+  if (enabled(record(proxy.smux).enabled)) fail('暂不支持 smux，未转换此订阅。');
+
+  const network = string(proxy.network).toLowerCase() || 'tcp';
+  if (!['tcp', 'ws', 'grpc', 'httpupgrade'].includes(network)) {
+    fail('暂不支持该 network，仅支持 TCP、WS、gRPC 和 HTTP Upgrade。');
+  }
+  params.set('type', network);
+  const ws = record(proxy['ws-opts']);
+  const headers = record(ws.headers ?? proxy['ws-headers']);
+  if (network === 'ws') {
+    if (Object.keys(headers).some((key) => key.toLowerCase() !== 'host')) {
+      fail('WS 暂不支持 Host 以外的自定义请求头。');
+    }
+    const host = Object.entries(headers).find(([key]) => key.toLowerCase() === 'host')?.[1];
+    if (host !== undefined && typeof host !== 'string') fail('WS Host 必须为字符串。');
+    if (host) params.set('host', string(host));
+    params.set('path', string(ws.path) || '/');
+    if (enabled(ws['v2ray-http-upgrade-fast-open'])) fail('暂不支持 HTTP Upgrade fast-open。');
+    if (enabled(ws['v2ray-http-upgrade'])) params.set('type', 'httpupgrade');
+    const earlyData = Number(ws['max-early-data'] ?? 0);
+    if (!Number.isInteger(earlyData) || earlyData < 0) fail('max-early-data 必须为非负整数。');
+    if (earlyData > 0) {
+      if (params.get('type') !== 'ws') fail('HTTP Upgrade 暂不支持 early data。');
+      params.set('ed', String(earlyData));
+      params.set('eh', string(ws['early-data-header-name']));
+    }
+  } else if (network === 'grpc') {
+    const grpc = record(proxy['grpc-opts']);
+    params.set('serviceName', string(grpc['grpc-service-name'] ?? grpc['service-name']));
+  } else if (network === 'httpupgrade') {
+    const upgrade = record(proxy['httpupgrade-opts']);
+    params.set('path', string(upgrade.path) || '/');
+    if (upgrade.host) params.set('host', string(upgrade.host));
+  }
+
+  const reality = record(proxy['reality-opts']);
+  const publicKey = string(reality['public-key']);
+  if (proxy['reality-opts'] !== undefined && !publicKey) fail('Reality 缺少 public-key。');
   if (publicKey) {
+    if (proxy.tls === false) fail('Reality 节点需要启用 TLS。');
+    if (reality['short-id'] !== undefined && typeof reality['short-id'] !== 'string') {
+      fail('Reality short-id 必须用引号包围，避免 YAML 将其当作数字。');
+    }
     params.set('security', 'reality');
     params.set('pbk', publicKey);
-    if (shortId) params.set('sid', shortId);
-  } else if (asBoolean(proxy.tls)) {
+    params.set('sid', string(reality['short-id']));
+  } else if (enabled(proxy.tls)) {
     params.set('security', 'tls');
   }
-
-  const serverName = asString(proxy.servername) || asString(proxy.sni);
-  if (serverName) params.set('sni', serverName);
-
-  if (asBoolean(proxy['skip-cert-verify'])) params.set('allowInsecure', '1');
-  const fingerprint = asString(proxy['client-fingerprint']);
-  if (fingerprint) params.set('fp', fingerprint);
-  const flow = asString(proxy.flow);
-  if (flow) params.set('flow', flow);
-  const packetEncoding = asString(proxy['packet-encoding']);
-  if (packetEncoding) params.set('packetEncoding', packetEncoding);
-
-  const network = asString(proxy.network).toLowerCase();
-  if (network) params.set('type', network === 'h2' ? 'http' : network);
-
-  const transport = network === 'ws' ? proxy['ws-opts'] : network === 'grpc' ? proxy['grpc-opts'] : proxy['http-opts'];
-  if (network === 'ws') {
-    const path = asString(proxy['ws-opts']?.path);
-    const host = firstHeader(proxy['ws-opts']?.headers, ['host']);
-    if (path) params.set('path', path);
-    if (host) params.set('host', host);
-  } else if (network === 'grpc') {
-    const grpc = proxy['grpc-opts'];
-    const serviceName = asString(grpc?.['grpc-service-name']) || asString(grpc?.['service-name']);
-    if (serviceName) params.set('serviceName', serviceName);
-  } else if (network === 'http' || network === 'h2' || network === 'httpupgrade') {
-    const http = proxy['http-opts'];
-    const path = asString(http?.path);
-    const host = firstHeader(http?.headers, ['host']);
-    if (path) params.set('path', path);
-    if (host) params.set('host', host);
+  const sni = string(proxy.servername ?? proxy.sni) || params.get('host');
+  if (sni) params.set('sni', sni);
+  if (enabled(proxy['skip-cert-verify'])) params.set('allowInsecure', '1');
+  if (proxy['client-fingerprint']) params.set('fp', string(proxy['client-fingerprint']));
+  if (proxy.flow) params.set('flow', string(proxy.flow));
+  if (proxy.alpn !== undefined) {
+    if (!Array.isArray(proxy.alpn) || proxy.alpn.some((value) => typeof value !== 'string' || !value || value.includes(','))) {
+      fail('alpn 必须为协议名称列表。');
+    }
+    params.set('alpn', (proxy.alpn as string[]).join(','));
+  } else if (params.has('security')) {
+    params.set('alpn', network === 'grpc' ? 'h2' : network === 'ws' || network === 'httpupgrade' ? 'http/1.1' : '');
   }
-
-  const query = params.toString();
-  return `vless://${encoded(uuid)}@${formatServer(server)}:${port}?${query}${name ? `#${encoded(name)}` : ''}`;
+  const packetEncoding = string(proxy['packet-encoding']) || (enabled(proxy.xudp) ? 'xudp' : '');
+  if (enabled(proxy['packet-addr']) || (packetEncoding && packetEncoding !== 'xudp')) {
+    fail('暂不支持该 packet-encoding，仅支持 xudp。');
+  }
+  if (packetEncoding) params.set('packetEncoding', packetEncoding);
+  return url.toString();
 };
 
 export const parseClashVlessNodes = (raw: string): string[] => {
-  let document: unknown;
+  let document: Record<string, unknown>;
   try {
-    document = parseYaml(raw);
+    // Parser snippets can contain UUIDs or subscription URLs, so never forward its errors.
+    const parsed = parseDocument(raw, { merge: true, prettyErrors: false });
+    if (parsed.errors.length || parsed.warnings.length) throw new Error('Invalid YAML document.');
+    document = record(parsed.toJS());
   } catch {
-    return [];
+    throw new SubscriptionError('Clash YAML/JSON 语法错误，请检查订阅响应格式。');
   }
-
-  if (!document || typeof document !== 'object' || !Array.isArray((document as { proxies?: unknown }).proxies)) {
-    return [];
+  if (!Array.isArray(document.proxies)) {
+    if (document['proxy-providers']) {
+      throw new SubscriptionError('该 Clash 配置使用 proxy-providers，请填写节点 provider 的订阅地址。');
+    }
+    throw new SubscriptionError('无法识别订阅格式；支持节点链接、Base64 和包含 proxies 的 Clash YAML/JSON。');
   }
-
-  return (document as { proxies: unknown[] }).proxies.flatMap((entry) => {
-    if (!entry || typeof entry !== 'object') return [];
-    const proxy = entry as ClashProxy;
-    return asString(proxy.type).toLowerCase() === 'vless' ? [clashProxyToVless(proxy)].filter(Boolean) : [];
-  }) as string[];
+  if (document.proxies.length === 0 && document['proxy-providers']) {
+    throw new SubscriptionError('该 Clash 配置的 proxies 为空，请填写节点 provider 的订阅地址。');
+  }
+  return document.proxies.flatMap((entry, index) => {
+    const proxy = record(entry);
+    return string(proxy.type).toLowerCase() === 'vless' ? [clashProxyToVless(proxy, index)] : [];
+  });
 };

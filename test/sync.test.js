@@ -375,6 +375,30 @@ test('refuses to touch the profile when no source yields a VLESS node', async ()
   assert.equal(await readProfile(config), before);
 });
 
+test('imports Clash nodes into External and retains parser diagnostics on failure', async () => {
+  const { config } = await makeConfig('clash-sync');
+  config.addressResolver.strategy = 'off';
+  const body = JSON.stringify({ proxies: [{
+    name: 'Clash WS', type: 'vless', server: 'node.example', port: 443, uuid: 'u', tls: true,
+    network: 'ws', alpn: ['http/1.1'], 'ws-opts': { path: '/ray', headers: { Host: 'cdn.example' } },
+  }] });
+  config.subscriptionUrls = [`data:application/json;base64,${Buffer.from(body).toString('base64')}`];
+  const result = await syncSubscriptionToSurge(config);
+  assert.equal(result.count, 1);
+  const [file] = await nodeConfigFiles(config);
+  const outbound = JSON.parse(await readFile(path.join(config.outputDir, file), 'utf8')).outbounds[0];
+  assert.equal(outbound.transport.path, '/ray');
+  assert.equal(outbound.transport.headers.Host, 'cdn.example');
+  const before = await readProfile(config);
+  config.subscriptionUrls = ['data:text/plain,proxies%3A%20%5BSECRET'];
+  await assert.rejects(syncSubscriptionToSurge(config), (error) => {
+    assert.match(error.message, /订阅 1.*语法错误/);
+    assert.doesNotMatch(error.message, /SECRET/);
+    return true;
+  });
+  assert.equal(await readProfile(config), before);
+});
+
 test('names the failing subscription without leaking its token', async () => {
   const { config } = await makeConfig('failing-url');
   const node = vlessLink(1, 'Alive');

@@ -2,7 +2,7 @@
 
 更新时间：2026-10-31
 
-适用版本：`1.6.1`
+适用版本：`1.6.3`
 
 本文是当前双引擎实现的主开发文档。所有结论以当前工作区源码、测试和构建配置为准。接手开发前先阅读根目录 `AGENTS.md`，再检查 `git status --short` 和实际差异。
 
@@ -62,6 +62,12 @@ subscriptionUrl / subscriptionUrls / vlessNodes
 ```
 
 订阅下载失败时，日志只记录订阅序号和来源站点，不输出完整 URL。某个来源为空或失败时继续处理其他来源。全部来源都没有可用 VLESS 节点时终止同步。
+
+`1.6.3` 输入支持原始链接列表、Base64（含 URL-safe）链接列表、Clash YAML/JSON 的 `proxies` 及 Base64 编码的 Clash 文档。仅导入 VLESS 节点，不导入订阅中的规则、DNS 或监听设置。只有 `proxy-providers` 的配置需要用户提供 provider 地址，不自动递归下载。Base64 属于编码，不能据此声称支持任意加密订阅。
+
+Clash 节点转成内部链接后走原有公共链路。TCP、WS、gRPC、HTTP Upgrade、TLS、Reality、ALPN 和 WS early data 已覆盖；普通 HTTP/H2/XHTTP 等未映射参数明确拒绝，不能将它们静默当作 TCP 或 HTTP Upgrade。Mihomo HTTP Upgrade 使用 `network: ws` 和 `ws-opts.v2ray-http-upgrade: true`，已核对官方 `adapter/outbound/vless.go`。
+
+HTTP、网络、解码和格式错误使用 `SubscriptionError` 的安全消息。YAML 解析器的原始异常可能包含凭据，禁止直接打印。全部来源失败时，将订阅序号和安全原因汇总到最终异常，使桌面向导和历史都能显示，避免控制台捕获丢失原因。
 
 ### 3.2 External 数据流
 
@@ -453,7 +459,7 @@ GitHub Actions 使用原生 Intel 和 Apple Silicon runner，分别执行测试�
 
 ### 12.1 自动测试覆盖
 
-当前测试共 117 项，主要覆盖：
+当前测试共 128 项，主要覆盖：
 
 1. CLI 参数、初始化、版本和敏感 URL 输出。
 2. 配置兼容、默认 External 和 Controller secret 持久化。
@@ -475,7 +481,7 @@ git diff --check
 
 现场结果：
 
-1. `npm test` 通过，共 117 项，0 项失败。
+1. `1.6.3` 的 `npm test` 通过，共 128 项，0 项失败。
 2. 订阅部分失败测试已覆盖重复节点、直接节点去重和敏感 URL 脱敏。
 3. `runtimeModeConfirmed` 已覆盖默认值、旧配置、首次 External 确认、写入阻断和定时同步阻断。
 4. 引擎切换保存失败测试已覆盖应用配置、Surge 文件和 Mihomo 服务状态恢复。
@@ -488,6 +494,8 @@ git diff --check
 11. 打包定时任务冒烟夹具已明确确认 External 引擎，并使用 arm64 与 x64 成品分别执行成功。
 
 ### 12.2 已完成的专项验证
+
+`1.6.3` 使用官方 sing-box `1.14.4` 和 Mihomo `1.19.33` 检查五组转换后的配置：TLS、Reality、WS early data、gRPC、HTTP Upgrade，均通过。下载包 SHA-256 与官方 Release digest 一致。这是配置接受性验证，不代表真实服务端连通测试。订阅 HTTP 路径、JSON/YAML/Base64、字段保留、错误脱敏、失败保留 Surge 配置均有回归测试；打包冒烟改用 Base64 Clash 配置，覆盖 Electron 包内的 YAML 依赖加载。
 
 1. 使用 MetaCubeX 官方稳定版 `v1.19.33` 的 `darwin-arm64` 二进制执行过 `mihomo -t -f <config>`。
 2. 官方二进制接受未知 `connect-timeout` 键，官方源码中的 VLESS 和基础拨号结构没有该字段，当前 Mihomo 输出已移除该键。

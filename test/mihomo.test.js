@@ -71,7 +71,8 @@ test('maps websocket, grpc and http upgrade transports', async () => {
   );
   assert.deepEqual(ws['ws-opts'], { path: '/ray', headers: { Host: 'cdn.example' } });
   assert.deepEqual(grpc['grpc-opts'], { 'grpc-service-name': 'svc' });
-  assert.deepEqual(httpupgrade['httpupgrade-opts'], { path: '/up', host: 'cdn.example' });
+  assert.equal(httpupgrade.network, 'ws');
+  assert.deepEqual(httpupgrade['ws-opts'], { path: '/up', headers: { Host: 'cdn.example' }, 'v2ray-http-upgrade': true });
 });
 
 test('renders loopback-only listeners and SOCKS5 Surge options', async () => {

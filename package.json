@@ -1,6 +1,6 @@
 {
   "name": "surge-vless-bridge",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Surge Mac VLESS support with selectable sing-box External and Mihomo gateway runtimes.",
   "license": "MIT",
   "author": "chen86860",
