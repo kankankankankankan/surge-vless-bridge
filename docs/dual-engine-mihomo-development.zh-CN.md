@@ -720,3 +720,36 @@ npm run desktop:smoke
 5. Electron 官方文档：`https://www.electronjs.org/docs/latest/`
 
 涉及 Surge 参数、Mihomo schema、Electron 打包或 macOS LaunchAgent 时，优先核对官方文档、官方源码和真实二进制。若未来分发第三方 GPL 二进制，需要单独完成许可证、源码提供和第三方通知评估。
+
+## 20. Mihomo 参考项目与更新评估（2026-10-31）
+
+感谢 [ssfun 及 Surge External Bridge 贡献者](https://github.com/ssfun/surge-external-bridge) 提供的 Mihomo 网关设计和文档。项目的直接上游仍为 [chen86860/surge-vless-bridge](https://github.com/chen86860/surge-vless-bridge)。这两个来源应分别保留署名。
+
+### 20.1 核对基线与最近更新
+
+本轮核对参考项目 `main` 的 HEAD 为 [`225ad72`](https://github.com/ssfun/surge-external-bridge/commit/225ad72ec28dfff17387939253f5d65afde85768)，提交时间为 2026-09-08 18:15:47（Asia/Singapore）。该时间早于本项目 10 月引入 Mihomo 的阶段；没有发现该主分支在此之后的新提交，不能把下面功能描述成近期刚新增或本项目已经合入。
+
+| 提交 | 参考项目的变化 | 对本项目的判断 |
+| --- | --- | --- |
+| [`225ad72`](https://github.com/ssfun/surge-external-bridge/commit/225ad72ec28dfff17387939253f5d65afde85768) | 紧凑节点列表、记住显示方式、更新设置分栏、窄窗口与能力标签换行 | 借鉴紧凑列表和布局验收。我们目前主要展示同步预览，暂无其完整节点诊断页，不宜直接移植 Vue 页面。 |
+| [`984b057`](https://github.com/ssfun/surge-external-bridge/commit/984b05719129eaf566b782d1121779c4c7edac73) | CLI 更新与运行实例协调、离线实例锁、回滚保护 | 借鉴同一实例识别、更新互斥和回滚状态核验。我们的进程内操作锁不能覆盖 CLI 与后台任务的并发。 |
+| [`5e4b950`](https://github.com/ssfun/surge-external-bridge/commit/5e4b95033141805e0f287c4ffa6acebb153fdd42) | 基于 Release 的自动更新、服务接管、失败回滚与设置页 | 优先完善内核更新后的运行版本与就绪验证；Electron 应用自身自动更新需单独设计。 |
+| [`37ff2fe`](https://github.com/ssfun/surge-external-bridge/commit/37ff2feeebefcb3d389e8fe40b29a28ebb4f792b) | 放宽实时连接快照大小限制 | 当前没有对应连接监控转发功能，无需移植；未来引入时再验证大连接数负载。 |
+
+### 20.2 现有能力中值得借鉴的部分
+
+以下依据固定版本的 [README](https://github.com/ssfun/surge-external-bridge/blob/225ad72ec28dfff17387939253f5d65afde85768/README.md)、[自动更新文档](https://github.com/ssfun/surge-external-bridge/blob/225ad72ec28dfff17387939253f5d65afde85768/docs/auto-update.md) 和相关源码，以及本项目 `1.6.3` 源码对照形成。属于后续建议，本轮仅修改文档。
+
+1. **优先：订阅失败保留该来源上次成功节点。** 参考项目通过 Mihomo Provider 缓存保留成功内容。本项目 `collectVlessNodes()` 对失败来源返回空数组；其他来源成功时仍可继续同步，失败来源旧节点可能因此从生成配置消失。应增加按来源隔离的最后成功缓存，显示缓存时间与失败状态，并区分下载失败、有效空订阅和用户主动删除来源。缓存不得输出私有 URL 或凭据。
+2. **优先：实际 TCP/UDP 诊断和分阶段结果。** 参考项目 [`internal/gateway/probe.go`](https://github.com/ssfun/surge-external-bridge/blob/225ad72ec28dfff17387939253f5d65afde85768/internal/gateway/probe.go) 经 SOCKS 执行 HTTP/TLS 与 UDP DNS 测试，区分入口、认证、出站、TLS 和响应错误。本项目 Mihomo doctor 当前只检查配置、服务、Controller 和本地 TCP 端口；端口可连接不能证明节点可用。后续应标明测试目标、时间与失败阶段，并明确桥接链路诊断不等同于经过 Surge 的整条链路验收。诊断功能本身不能保证提高节点成功率。
+3. **优先：内核更新完成后的运行验收与自动恢复。** 本项目官方 Mihomo 安装已有下载大小、SHA-256、候选版本检查和上一版文件；`installMihomo()` 在保存二进制路径后即报告完成，未核对运行服务是否使用目标版本。参考项目在重启后验证版本、实例身份和网关状态，失败才恢复。应适配为本项目的独立内核更新事务，不能用下载完成或文件替换成功代表正在运行的新版本已可用。Homebrew 与托管安装需分别处理回退能力。
+4. **后续：稳定节点身份。** 参考项目 [`projection.go`](https://github.com/ssfun/surge-external-bridge/blob/225ad72ec28dfff17387939253f5d65afde85768/internal/mihomo/projection.go) 根据节点身份生成凭据。本项目以 `portStart + index` 分配端口，订阅重新排序会改变节点端口。可借鉴稳定身份思想，持久化节点与端口映射；无须为此先改成共享认证端口。
+5. **后续：紧凑节点操作界面。** 当前预览已有列表，可在增加真实诊断后提供筛选、批量检测、结果时间和失败原因。布局验收覆盖窄窗口、长名称、换行与批量状态；不为复制参考项目外观增加无用卡片。
+
+### 20.3 保留的架构边界
+
+参考项目使用 Go 内嵌 Mihomo、原生 Provider、自管共享认证 SOCKS5 listener 和 `policy-path` 发布。我们使用 Node.js/Electron、独立 Mihomo 二进制、每节点回环 listener 和直接维护 Surge 托管区块。共享端口、Provider 热更新、多协议透传、局域网网关与 Policy Path 均属于架构扩展，暂不整体迁入。
+
+本项目当前 Clash 导入仍只接收 VLESS，并经公共模型转换；参考项目的原生 Mihomo Provider 能力不能作为本项目已支持全部 Clash 字段或协议的依据。其自动更新文档中的测试结果也不能作为我们已完成的验收证据。
+
+参考项目根目录 [LICENSE](https://github.com/ssfun/surge-external-bridge/blob/225ad72ec28dfff17387939253f5d65afde85768/LICENSE) 声明 GPL-3.0-or-later，并附有名称与关联使用限制；本项目当前声明 MIT。后续应参考行为需求独立实现；若复制或改编其代码，须先核对相应许可证义务，致谢不能替代许可证合规。本轮增加来源链接和分析，未引入参考项目源码。

@@ -324,3 +324,13 @@ npm run build
 This project builds on the original [surge-vless-bridge](https://github.com/chen86860/surge-vless-bridge)
 created by [chen86860](https://github.com/chen86860). The original author and copyright notice remain
 in `package.json` and `LICENSE`.
+
+Thanks also to [ssfun](https://github.com/ssfun) and the contributors to
+[Surge External Bridge](https://github.com/ssfun/surge-external-bridge).
+Its [architecture and usage documentation](https://github.com/ssfun/surge-external-bridge/blob/main/README.md)
+informed our Mihomo gateway design. Its [automatic update documentation](https://github.com/ssfun/surge-external-bridge/blob/main/docs/auto-update.md)
+is also a reference for future update verification and recovery work.
+Our implementation runs a separate Mihomo executable with per-node loopback listeners;
+Surge External Bridge embeds Mihomo and routes nodes through an authenticated shared SOCKS5 endpoint.
+See our [reference review](docs/dual-engine-mihomo-development.zh-CN.md#20-mihomo-参考项目与更新评估2026-10-31)
+for the reviewed revision, adoption recommendations and license boundary.

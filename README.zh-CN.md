@@ -316,3 +316,11 @@ npm run build
 本项目基于 [chen86860](https://github.com/chen86860) 创建的原版
 [surge-vless-bridge](https://github.com/chen86860/surge-vless-bridge) 继续扩展。
 `package.json` 中的原作者信息和 `LICENSE` 中的原版权声明均予以保留。
+
+同时感谢 [ssfun](https://github.com/ssfun) 及
+[Surge External Bridge](https://github.com/ssfun/surge-external-bridge) 的贡献者。
+该项目的[架构与使用文档](https://github.com/ssfun/surge-external-bridge/blob/main/README.md)
+为我们的 Mihomo 网关设计提供了参考；其[自动更新文档](https://github.com/ssfun/surge-external-bridge/blob/main/docs/auto-update.md)
+也为后续更新验收与故障恢复提供了借鉴。
+本项目使用独立 Mihomo 可执行文件和每节点回环监听；该参考项目内嵌 Mihomo，通过带认证的共享 SOCKS5 入口分配节点。
+核对版本、采纳建议和许可证边界见[参考项目评估](docs/dual-engine-mihomo-development.zh-CN.md#20-mihomo-参考项目与更新评估2026-10-31)。
