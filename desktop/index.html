@@ -60,42 +60,94 @@
             <div class="engine-onboarding-heading">
               <span class="engine-onboarding-icon"><i data-lucide="waypoints"></i></span>
               <div>
-                <div class="engine-onboarding-title-row"><h2 id="engine-onboarding-title">先选择运行方式</h2><span>首次使用必选</span></div>
-                <p>应用会根据所选后端生成 Surge 节点。确认后进入配置，也可以稍后在设置中切换。</p>
+                <div class="engine-onboarding-title-row"><h2 id="engine-onboarding-title">配置向导</h2><span id="engine-onboarding-badge">首次使用</span></div>
+                <p>完成内核、订阅、Surge 配置和常用选项，最后一次保存并同步。</p>
               </div>
             </div>
-            <div class="engine-choice-grid" role="radiogroup" aria-label="首次运行引擎">
-              <button id="engine-onboarding-external" type="button" class="engine-choice" data-onboarding-runtime-mode="external" role="radio" aria-checked="false">
-                <span class="engine-choice-icon"><i data-lucide="boxes"></i></span>
-                <span class="engine-choice-copy">
-                  <span class="engine-choice-title"><strong>sing-box External</strong><em>兼容优先</em></span>
-                  <small>保留 Surge external 写法，每个节点按需启动一个 sing-box 进程。</small>
-                  <span class="engine-choice-meta">适合现有配置或节点数量较少</span>
-                </span>
-                <i class="engine-choice-check" data-lucide="circle-check"></i>
-              </button>
-              <button id="engine-onboarding-mihomo" type="button" class="engine-choice" data-onboarding-runtime-mode="mihomo" role="radio" aria-checked="false">
-                <span class="engine-choice-icon"><i data-lucide="network"></i></span>
-                <span class="engine-choice-copy">
-                  <span class="engine-choice-title"><strong>Mihomo 网关</strong><em>集中管理</em></span>
-                  <small>Surge 连接本地 SOCKS5，由单个 Mihomo 后台进程承载全部节点。</small>
-                  <span class="engine-choice-meta">适合节点较多，需要统一后台管理</span>
-                </span>
-                <i class="engine-choice-check" data-lucide="circle-check"></i>
-              </button>
+            <div class="setup-stepper" aria-label="配置进度">
+              <span data-setup-step-indicator="1"><b>1</b><small>运行方式</small></span>
+              <span data-setup-step-indicator="2"><b>2</b><small>订阅节点</small></span>
+              <span data-setup-step-indicator="3"><b>3</b><small>Surge 设置</small></span>
+              <span data-setup-step-indicator="4"><b>4</b><small>检查完成</small></span>
             </div>
-            <div id="onboarding-mihomo-actions" class="onboarding-mihomo-actions hidden">
-              <span id="onboarding-mihomo-status">尚未检测到 Mihomo</span>
-              <div class="button-row">
-                <button id="onboarding-install-mihomo-direct" type="button" class="button secondary"><i data-lucide="download"></i><span>安装官方版</span></button>
-                <button id="onboarding-install-mihomo-brew" type="button" class="button secondary"><i data-lucide="package"></i><span>Homebrew 安装</span></button>
-                <button id="onboarding-choose-mihomo" type="button" class="button secondary"><i data-lucide="folder-open"></i><span>选择已有文件</span></button>
+
+            <div id="setup-step-engine" class="setup-step" data-setup-step="1">
+              <div class="engine-choice-grid" role="radiogroup" aria-label="运行引擎">
+                <button id="engine-onboarding-external" type="button" class="engine-choice" data-onboarding-runtime-mode="external" role="radio" aria-checked="false">
+                  <span class="engine-choice-icon"><i data-lucide="boxes"></i></span>
+                  <span class="engine-choice-copy">
+                    <span class="engine-choice-title"><strong>sing-box External</strong><em>兼容优先</em></span>
+                    <small>保留 Surge external 写法，每个节点按需启动一个 sing-box 进程。</small>
+                    <span class="engine-choice-meta">适合现有配置或节点数量较少</span>
+                  </span>
+                  <i class="engine-choice-check" data-lucide="circle-check"></i>
+                </button>
+                <button id="engine-onboarding-mihomo" type="button" class="engine-choice" data-onboarding-runtime-mode="mihomo" role="radio" aria-checked="false">
+                  <span class="engine-choice-icon"><i data-lucide="network"></i></span>
+                  <span class="engine-choice-copy">
+                    <span class="engine-choice-title"><strong>Mihomo 网关</strong><em>集中管理</em></span>
+                    <small>Surge 连接本地 SOCKS5，由单个 Mihomo 后台进程承载全部节点。</small>
+                    <span class="engine-choice-meta">适合节点较多，需要统一后台管理</span>
+                  </span>
+                  <i class="engine-choice-check" data-lucide="circle-check"></i>
+                </button>
               </div>
-              <div id="onboarding-mihomo-install-progress" class="install-progress hidden" role="status" aria-live="polite"></div>
+              <div id="onboarding-external-actions" class="onboarding-engine-actions hidden">
+                <span id="onboarding-external-status">尚未检测到 sing-box</span>
+                <div class="button-row">
+                  <button id="onboarding-install-sing-box-direct" type="button" class="button secondary"><i data-lucide="download"></i><span>安装官方版</span></button>
+                  <button id="onboarding-install-sing-box-brew" type="button" class="button secondary"><i data-lucide="package"></i><span>Homebrew 安装</span></button>
+                  <button id="onboarding-choose-sing-box" type="button" class="button secondary"><i data-lucide="folder-open"></i><span>选择已有文件</span></button>
+                </div>
+                <div id="onboarding-sing-box-install-progress" class="install-progress hidden" role="status" aria-live="polite"></div>
+              </div>
+              <div id="onboarding-mihomo-actions" class="onboarding-engine-actions hidden">
+                <span id="onboarding-mihomo-status">尚未检测到 Mihomo</span>
+                <div class="button-row">
+                  <button id="onboarding-install-mihomo-direct" type="button" class="button secondary"><i data-lucide="download"></i><span>安装官方版</span></button>
+                  <button id="onboarding-install-mihomo-brew" type="button" class="button secondary"><i data-lucide="package"></i><span>Homebrew 安装</span></button>
+                  <button id="onboarding-choose-mihomo" type="button" class="button secondary"><i data-lucide="folder-open"></i><span>选择已有文件</span></button>
+                </div>
+                <div id="onboarding-mihomo-install-progress" class="install-progress hidden" role="status" aria-live="polite"></div>
+              </div>
             </div>
+
+            <div id="setup-step-sources" class="setup-step hidden" data-setup-step="2">
+              <div class="setup-section-heading"><div><h3>订阅与节点</h3><p>至少填写一个订阅地址或直接 VLESS 节点。</p></div><button id="wizard-add-subscription" type="button" class="button secondary"><i data-lucide="plus"></i><span>添加订阅</span></button></div>
+              <div id="wizard-subscription-list" class="wizard-source-list"></div>
+              <label class="field"><span>直接 VLESS 节点</span><textarea id="wizard-vless-nodes" class="code-input compact" rows="4" spellcheck="false" placeholder="每行一个 vless:// 地址"></textarea><small class="field-help">可选，每行一个完整节点。</small></label>
+            </div>
+
+            <div id="setup-step-settings" class="setup-step hidden" data-setup-step="3">
+              <div class="setup-section-heading"><div><h3>Surge 与常用设置</h3><p>推荐值适合大多数首次安装，不会覆盖未显示的高级设置。</p></div><button id="apply-wizard-recommendations" type="button" class="button secondary"><i data-lucide="sparkles"></i><span>应用推荐值</span></button></div>
+              <label class="field"><span>Surge 配置文件</span><div class="input-action"><input id="wizard-surge-config-path" type="text" /><button id="wizard-choose-surge-profile" type="button" class="icon-button" title="选择文件"><i data-lucide="folder-open"></i></button></div></label>
+              <div class="field-grid two">
+                <label class="field"><span>VLESS 策略组名称</span><input id="wizard-policy-group-name" type="text" /></label>
+                <label class="field"><span>起始端口</span><input id="wizard-port-start" type="number" min="1024" max="65535" /></label>
+                <label class="field"><span>保留备份数量</span><input id="wizard-backup-keep" type="number" min="1" max="200" /></label>
+              </div>
+              <div class="wizard-options">
+                <label class="checkbox-row"><input id="wizard-auto-reload" type="checkbox" /><span>同步后自动重载 Surge</span></label>
+                <label class="checkbox-row"><input id="wizard-tcp-fast-open" type="checkbox" /><span>开启 TCP Fast Open</span></label>
+                <label class="checkbox-row"><input id="wizard-udp-relay" type="checkbox" /><span>开启 UDP 转发</span></label>
+                <label id="wizard-mihomo-auto-start-row" class="checkbox-row hidden"><input id="wizard-mihomo-auto-start" type="checkbox" /><span>登录后自动运行 Mihomo</span></label>
+              </div>
+              <small class="field-help">UDP 需要节点服务端支持；不确定时可以先关闭，稍后在设置中开启。</small>
+            </div>
+
+            <div id="setup-step-review" class="setup-step hidden" data-setup-step="4">
+              <div class="setup-section-heading"><div><h3>检查并完成</h3><p>确认后会保存配置、验证内核，并执行首次同步。</p></div></div>
+              <div id="setup-review-list" class="setup-review-list"></div>
+            </div>
+
             <div class="engine-onboarding-footer">
               <p id="engine-onboarding-status">请选择一种运行方式后继续。</p>
-              <button id="confirm-engine-choice" type="button" class="button primary" disabled><i data-lucide="check"></i><span>选择后继续</span></button>
+              <div class="button-row">
+                <button id="close-setup-wizard" type="button" class="button secondary hidden"><i data-lucide="x"></i><span>取消</span></button>
+                <button id="setup-wizard-back" type="button" class="button secondary hidden"><i data-lucide="arrow-left"></i><span>上一步</span></button>
+                <button id="setup-wizard-next" type="button" class="button primary"><span>下一步</span><i data-lucide="arrow-right"></i></button>
+                <button id="confirm-engine-choice" type="button" class="button primary hidden"><i data-lucide="check"></i><span>保存并首次同步</span></button>
+              </div>
             </div>
           </div>
         </section>
@@ -243,7 +295,7 @@
         <section id="view-settings" class="view">
           <form id="settings-form" class="form-layout narrow">
             <section class="section-block form-section">
-              <div class="section-heading"><div><h2>运行引擎</h2><p>External 保留原有方式，Mihomo 使用单进程多监听后台网关。</p></div></div>
+              <div class="section-heading"><div><h2>运行引擎</h2><p>External 保留原有方式，Mihomo 使用单进程多监听后台网关。</p></div><button id="open-setup-wizard" type="button" class="button secondary"><i data-lucide="list-restart"></i><span>配置向导</span></button></div>
               <div id="runtime-mode-control" class="engine-switch-grid" role="radiogroup" aria-label="运行引擎">
                 <button id="runtime-mode-external" type="button" class="engine-switch-option" data-runtime-mode="external" role="radio">
                   <span class="engine-switch-icon"><i data-lucide="boxes"></i></span>

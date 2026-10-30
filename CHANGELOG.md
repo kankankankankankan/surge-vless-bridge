@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## [1.6.1] - 2026-10-31
+
+### Added
+
+- Expand first launch into a four-step setup wizard covering core installation, named subscriptions and direct nodes, Surge settings, review, and the initial sync.
+- Allow configured users to reopen the same wizard from settings with existing values prefilled.
+
+### Fixed
+
+- Avoid running a premature sync when Mihomo is selected before sources and the Surge profile have been configured.
+- Keep wizard footer actions visible at the minimum window size while only the form content scrolls.
+
+## [1.6.0] - 2026-10-24
+
 ### Added
 
 - Build and verify native Intel x86_64 and Apple Silicon arm64 DMGs with GitHub Actions, then upload each architecture with its SHA256 checksum.

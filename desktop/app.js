@@ -63,6 +63,11 @@ let mihomoUpdateChecked = false;
 let engineDraftMode = 'external';
 let onboardingDraftMode;
 let engineOnboardingVisible = false;
+let setupWizardOpen = false;
+let setupWizardInitialized = false;
+let setupWizardStep = 1;
+let setupWizardError = '';
+let wizardSourceDraft = { subscriptionUrls: [], subscriptionNames: [], vlessNodes: [] };
 const installProgressByTarget = new Map();
 let installIndicatorTimer;
 
@@ -192,7 +197,7 @@ const renderInstallProgress = (target) => {
   const markup = `<div class="install-progress-heading"><div><strong>${escapeHtml(event.message)}</strong><span>${escapeHtml(event.detail || (event.method === 'homebrew' ? 'Homebrew 正在运行' : '正在处理官方发布包'))}</span></div><span class="install-progress-percent">${failed ? '失败' : complete ? '完成' : event.indeterminate ? '进行中' : `${Math.round(percent)}%`}</span></div><div class="install-progress-track"><div class="install-progress-bar" style="width:${event.indeterminate && !complete && !failed ? '' : `${complete ? 100 : percent}%`}"></div></div><div class="install-progress-stages">${stages}</div>${bytesText ? `<div class="install-progress-meta">${escapeHtml(bytesText)}</div>` : ''}`;
   const panels = target === 'mihomo'
     ? [$('#mihomo-install-progress'), $('#onboarding-mihomo-install-progress')]
-    : [$('#sing-box-install-progress')];
+    : [$('#sing-box-install-progress'), $('#onboarding-sing-box-install-progress')];
   panels.filter(Boolean).forEach((panel) => {
     panel.className = `install-progress${event.indeterminate && !complete && !failed ? ' indeterminate' : ''}${complete ? ' complete' : ''}${failed ? ' failed' : ''}`;
     panel.innerHTML = markup;
@@ -419,18 +424,137 @@ const renderOverview = () => {
   renderActivityList($('#recent-activity'), state.history.slice(0, 5), true);
 };
 
+const renderWizardSubscriptionList = () => {
+  const rows = wizardSourceDraft.subscriptionUrls.length
+    ? wizardSourceDraft.subscriptionUrls
+    : [''];
+  if (wizardSourceDraft.subscriptionUrls.length === 0) {
+    wizardSourceDraft.subscriptionUrls.push('');
+    wizardSourceDraft.subscriptionNames.push('');
+  }
+  $('#wizard-subscription-list').innerHTML = rows
+    .map(
+      (url, index) => `<div class="wizard-source-row"><label><span>自定义名称</span><input data-wizard-source-name data-wizard-source-index="${index}" type="text" value="${escapeHtml(wizardSourceDraft.subscriptionNames[index] || '')}" placeholder="例如：主订阅" /></label><label><span>订阅地址</span><input data-wizard-source-url data-wizard-source-index="${index}" type="text" value="${escapeHtml(url)}" placeholder="https://example.com/subscription" spellcheck="false" /></label><button type="button" class="icon-button" data-wizard-source-remove="${index}" title="移除"><i data-lucide="x"></i></button></div>`,
+    )
+    .join('');
+};
+
+const syncWizardSourcesFromDom = () => {
+  $$('[data-wizard-source-url]').forEach((input) => {
+    wizardSourceDraft.subscriptionUrls[Number(input.dataset.wizardSourceIndex)] = input.value;
+  });
+  $$('[data-wizard-source-name]').forEach((input) => {
+    wizardSourceDraft.subscriptionNames[Number(input.dataset.wizardSourceIndex)] = input.value;
+  });
+  wizardSourceDraft.vlessNodes = $('#wizard-vless-nodes').value.split(/\r?\n/);
+};
+
+const wizardSourcesPayload = () => {
+  syncWizardSourcesFromDom();
+  const subscriptions = wizardSourceDraft.subscriptionUrls
+    .map((value, index) => ({ url: value.trim(), name: wizardSourceDraft.subscriptionNames[index]?.trim() ?? '' }))
+    .filter((entry) => entry.url);
+  return {
+    subscriptionUrls: subscriptions.map((entry) => entry.url),
+    subscriptionNames: subscriptions.map((entry) => entry.name),
+    vlessNodes: wizardSourceDraft.vlessNodes.map((value) => value.trim()).filter(Boolean),
+  };
+};
+
+const wizardSettingsPayload = () => ({
+  ...state.config,
+  surgeConfigPath: $('#wizard-surge-config-path').value.trim(),
+  policyGroupName: $('#wizard-policy-group-name').value.trim(),
+  portStart: Number($('#wizard-port-start').value),
+  backupKeep: Number($('#wizard-backup-keep').value),
+  autoReload: $('#wizard-auto-reload').checked,
+  udpRelay: $('#wizard-udp-relay').checked,
+  tcpFastOpen: $('#wizard-tcp-fast-open').checked,
+  mihomoAutoStart: $('#wizard-mihomo-auto-start').checked,
+});
+
+const initializeSetupWizard = () => {
+  setupWizardInitialized = true;
+  setupWizardStep = 1;
+  setupWizardError = '';
+  if (state.runtimeModeConfirmed) onboardingDraftMode = state.config.runtimeMode;
+  wizardSourceDraft = {
+    subscriptionUrls: [...state.config.subscriptionUrls],
+    subscriptionNames: [...state.config.subscriptionNames],
+    vlessNodes: [...state.config.vlessNodes],
+  };
+  renderWizardSubscriptionList();
+  $('#wizard-vless-nodes').value = wizardSourceDraft.vlessNodes.join('\n');
+  $('#wizard-surge-config-path').value = state.config.surgeConfigPath;
+  $('#wizard-policy-group-name').value = state.config.policyGroupName || 'VLESS';
+  $('#wizard-port-start').value = String(state.config.portStart || 2081);
+  $('#wizard-backup-keep').value = String(state.config.backupKeep || 20);
+  $('#wizard-auto-reload').checked = state.config.autoReload;
+  $('#wizard-tcp-fast-open').checked = state.config.tcpFastOpen;
+  $('#wizard-udp-relay').checked = state.config.udpRelay;
+  $('#wizard-mihomo-auto-start').checked = state.config.mihomoAutoStart;
+};
+
+const selectedWizardDependency = () =>
+  onboardingDraftMode === 'mihomo' ? state.environment.mihomo : state.environment.singBox;
+
+const setupWizardStatus = () => {
+  if (setupWizardError) return setupWizardError;
+  if (setupWizardStep === 1) {
+    if (!onboardingDraftMode) return '请选择运行方式。';
+    if (!selectedWizardDependency().installed) return '请先安装或选择对应内核。';
+    return '内核已就绪，可以继续配置订阅。';
+  }
+  if (setupWizardStep === 2) return '订阅地址和直接节点仅保存在本机配置中。';
+  if (setupWizardStep === 3) return '推荐值可以稍后在设置中单独调整。';
+  return '完成后会立即执行一次同步，失败时保留向导以便修改。';
+};
+
+const renderSetupReview = () => {
+  const sources = wizardSourcesPayload();
+  const settings = wizardSettingsPayload();
+  const engine = onboardingDraftMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External';
+  const sourceSummary = `${sources.subscriptionUrls.length} 个订阅，${sources.vlessNodes.length} 个直接节点`;
+  const options = [
+    settings.autoReload ? '自动重载' : '手动重载',
+    settings.tcpFastOpen ? 'TCP Fast Open' : 'TFO 关闭',
+    settings.udpRelay ? 'UDP 开启' : 'UDP 关闭',
+  ];
+  if (onboardingDraftMode === 'mihomo') options.push(settings.mihomoAutoStart ? '后台自启' : '不自启');
+  $('#setup-review-list').innerHTML = [
+    ['运行方式', engine],
+    ['节点来源', sourceSummary],
+    ['Surge 配置', settings.surgeConfigPath || '未选择'],
+    ['策略组与端口', `${settings.policyGroupName || 'VLESS'}，从 ${settings.portStart} 开始`],
+    ['常用选项', options.join('、')],
+  ]
+    .map(([label, value]) => `<div class="setup-review-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+    .join('');
+};
+
 const renderEngineOnboarding = () => {
   if (!state) return;
   const onboarding = $('#engine-onboarding');
-  const visible = !state.runtimeModeConfirmed;
+  const visible = !state.runtimeModeConfirmed || setupWizardOpen;
   onboarding.classList.toggle('hidden', !visible);
   document.body.classList.toggle('engine-choice-required', visible);
   if (!visible) {
     engineOnboardingVisible = false;
+    setupWizardInitialized = false;
     return;
   }
+  if (!setupWizardInitialized) initializeSetupWizard();
   if (!engineOnboardingVisible) requestAnimationFrame(() => $('#engine-onboarding-external').focus());
   engineOnboardingVisible = true;
+
+  $('#engine-onboarding-badge').textContent = state.runtimeModeConfirmed ? '重新配置' : '首次使用';
+  $('#close-setup-wizard').classList.toggle('hidden', !state.runtimeModeConfirmed);
+  $$('[data-setup-step]').forEach((panel) => panel.classList.toggle('hidden', Number(panel.dataset.setupStep) !== setupWizardStep));
+  $$('[data-setup-step-indicator]').forEach((indicator) => {
+    const step = Number(indicator.dataset.setupStepIndicator);
+    indicator.classList.toggle('active', step === setupWizardStep);
+    indicator.classList.toggle('done', step < setupWizardStep);
+  });
 
   const selectedMode = onboardingDraftMode;
   $$('[data-onboarding-runtime-mode]').forEach((button) => {
@@ -439,24 +563,36 @@ const renderEngineOnboarding = () => {
     button.setAttribute('aria-checked', String(selected));
     button.disabled = busy;
   });
+  const externalSelected = selectedMode === 'external';
   const mihomoSelected = selectedMode === 'mihomo';
+  const singBoxInstalled = state.environment.singBox.installed;
   const mihomoInstalled = state.environment.mihomo.installed;
+  $('#onboarding-external-actions').classList.toggle('hidden', !externalSelected);
   $('#onboarding-mihomo-actions').classList.toggle('hidden', !mihomoSelected);
+  $('#onboarding-external-status').textContent = singBoxInstalled
+    ? `已检测到 ${state.environment.singBox.currentVersion ? `sing-box v${state.environment.singBox.currentVersion}` : 'sing-box 可执行文件'}`
+    : '尚未检测到 sing-box，可安装或选择已有文件。';
   $('#onboarding-mihomo-status').textContent = mihomoInstalled
     ? `已检测到 ${state.environment.mihomo.currentVersion ? `Mihomo v${state.environment.mihomo.currentVersion}` : 'Mihomo 可执行文件'}`
     : '尚未检测到 Mihomo，可安装或选择已有文件。';
+  $('#onboarding-install-sing-box-direct').disabled = busy;
+  $('#onboarding-install-sing-box-brew').disabled = busy || !state.environment.homebrewPath;
+  $('#onboarding-choose-sing-box').disabled = busy;
   $('#onboarding-install-mihomo-direct').disabled = busy;
   $('#onboarding-install-mihomo-brew').disabled = busy || !state.environment.homebrewPath;
   $('#onboarding-choose-mihomo').disabled = busy;
-  $('#confirm-engine-choice span').textContent =
-    selectedMode === 'mihomo' ? '确认使用 Mihomo' : selectedMode === 'external' ? '确认使用 External' : '选择后继续';
-  $('#confirm-engine-choice').disabled = busy || !selectedMode || (mihomoSelected && !mihomoInstalled);
-  $('#engine-onboarding-status').textContent =
-    !selectedMode
-      ? '请选择一种运行方式。确认后，应用会检查对应内核和 Surge 配置。'
-      : mihomoSelected && !mihomoInstalled
-      ? '安装或选择 Mihomo 后才能确认。'
-      : '确认时会先验证目标引擎，失败时保留当前配置。';
+  $('#wizard-mihomo-auto-start-row').classList.toggle('hidden', !mihomoSelected);
+
+  if (setupWizardStep === 4) renderSetupReview();
+  $('#setup-wizard-back').classList.toggle('hidden', setupWizardStep === 1);
+  $('#setup-wizard-next').classList.toggle('hidden', setupWizardStep === 4);
+  $('#confirm-engine-choice').classList.toggle('hidden', setupWizardStep !== 4);
+  const dependencyReady = Boolean(selectedMode && selectedWizardDependency().installed && selectedWizardDependency().currentVersion);
+  $('#setup-wizard-next').disabled = busy || (setupWizardStep === 1 && !dependencyReady);
+  $('#confirm-engine-choice').disabled = busy;
+  const status = $('#engine-onboarding-status');
+  status.textContent = setupWizardStatus();
+  status.classList.toggle('error', Boolean(setupWizardError));
 };
 
 const sourceDescription = (value, kind) => {
@@ -907,7 +1043,7 @@ const loadState = async (showCover = true) => {
       : await stateRequest;
     state = nextState;
     loaded = true;
-    if (state.runtimeModeConfirmed) onboardingDraftMode = state.config.runtimeMode;
+    if (state.runtimeModeConfirmed && !setupWizardOpen) onboardingDraftMode = state.config.runtimeMode;
     $('#app-version').textContent = `v${version}`;
     sourceDraft = {
       subscriptionUrls: [...state.config.subscriptionUrls],
@@ -920,9 +1056,11 @@ const loadState = async (showCover = true) => {
       engineDraftMode = previousEngineDraftMode;
       updateEngineFields();
     }
-    if (state.config.runtimeMode === 'mihomo') {
-      if (!mihomoUpdateChecked) void refreshMihomoStatus(false);
-    } else if (!singBoxUpdateChecked) void refreshSingBoxStatus(false);
+    if (state.runtimeModeConfirmed) {
+      if (state.config.runtimeMode === 'mihomo') {
+        if (!mihomoUpdateChecked) void refreshMihomoStatus(false);
+      } else if (!singBoxUpdateChecked) void refreshSingBoxStatus(false);
+    }
   } catch (error) {
     const message = error.message || String(error);
     showToast(message, true);
@@ -1545,13 +1683,33 @@ $('#connect-timeout-enabled').addEventListener('change', updateConnectionOptionF
 $$('[data-onboarding-runtime-mode]').forEach((button) =>
   button.addEventListener('click', () => {
     onboardingDraftMode = button.dataset.onboardingRuntimeMode;
+    setupWizardError = '';
     renderEngineOnboarding();
     window.lucide?.createIcons();
   }),
 );
 
+$('#onboarding-install-sing-box-direct').addEventListener('click', () => installSingBox('direct'));
+$('#onboarding-install-sing-box-brew').addEventListener('click', () => installSingBox('homebrew'));
 $('#onboarding-install-mihomo-direct').addEventListener('click', () => installMihomo('direct'));
 $('#onboarding-install-mihomo-brew').addEventListener('click', () => installMihomo('homebrew'));
+$('#onboarding-choose-sing-box').addEventListener('click', async () => {
+  const selectedPath = await api.chooseFile('sing-box');
+  if (!selectedPath) return;
+  setBusy(true, '正在保存 sing-box 路径');
+  try {
+    state = await api.saveSettings({ ...state.config, singBoxBinary: selectedPath });
+    onboardingDraftMode = 'external';
+    setupWizardError = '';
+    renderAll();
+    showToast('已使用选择的 sing-box 文件。');
+  } catch (error) {
+    setupWizardError = error.message || String(error);
+    showToast(setupWizardError, true);
+  } finally {
+    setBusy(false);
+  }
+});
 $('#onboarding-choose-mihomo').addEventListener('click', async () => {
   const selectedPath = await api.chooseFile('mihomo');
   if (!selectedPath) return;
@@ -1559,32 +1717,166 @@ $('#onboarding-choose-mihomo').addEventListener('click', async () => {
   try {
     state = await api.saveSettings({ ...state.config, mihomoBinary: selectedPath });
     onboardingDraftMode = 'mihomo';
+    setupWizardError = '';
     renderAll();
     showToast('已使用选择的 Mihomo 文件。');
   } catch (error) {
-    showToast(error.message || String(error), true);
+    setupWizardError = error.message || String(error);
+    showToast(setupWizardError, true);
   } finally {
     setBusy(false);
   }
 });
 
-$('#confirm-engine-choice').addEventListener('click', async () => {
-  if (!onboardingDraftMode) return;
-  const targetMode = onboardingDraftMode;
-  setBusy(true, '正在确认运行引擎');
+const validateWizardEngineStep = () => {
+  if (!onboardingDraftMode) throw new Error('请选择运行方式。');
+  const dependency = selectedWizardDependency();
+  const label = onboardingDraftMode === 'mihomo' ? 'Mihomo' : 'sing-box';
+  if (!dependency.installed) throw new Error(`请先安装或选择 ${label} 可执行文件。`);
+  if (!dependency.currentVersion) throw new Error(`无法识别 ${label} 版本，请重新安装或选择正确文件。`);
+};
+
+const validateWizardSourcesStep = () => {
+  const sources = wizardSourcesPayload();
+  if (sources.subscriptionUrls.length === 0 && sources.vlessNodes.length === 0) {
+    throw new Error('请至少填写一个订阅地址或直接 VLESS 节点。');
+  }
+  for (const value of sources.subscriptionUrls) {
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new Error(`订阅地址格式无效：${value}`);
+    }
+    if (!['http:', 'https:', 'data:'].includes(url.protocol)) {
+      throw new Error('订阅地址仅支持 HTTP、HTTPS 或 data 地址。');
+    }
+  }
+  if (sources.vlessNodes.some((value) => !value.startsWith('vless://'))) {
+    throw new Error('直接节点必须以 vless:// 开头。');
+  }
+  return sources;
+};
+
+const validateWizardSettingsStep = async () => {
+  const settings = wizardSettingsPayload();
+  if (!settings.surgeConfigPath) throw new Error('请选择 Surge 配置文件。');
+  if (!settings.policyGroupName) throw new Error('请填写 VLESS 策略组名称。');
+  if (!Number.isInteger(settings.portStart) || settings.portStart < 1024 || settings.portStart > 65535) {
+    throw new Error('起始端口必须在 1024 到 65535 之间。');
+  }
+  if (!Number.isInteger(settings.backupKeep) || settings.backupKeep < 1 || settings.backupKeep > 200) {
+    throw new Error('备份数量必须在 1 到 200 之间。');
+  }
+  state.policyGroups = await api.inspectPolicyGroups({
+    surgeConfigPath: settings.surgeConfigPath,
+    policyGroupName: settings.policyGroupName,
+  });
+  return settings;
+};
+
+const moveSetupWizard = async (direction) => {
+  setupWizardError = '';
   try {
-    const result = await api.switchEngine(targetMode);
-    showToast(result.message, !result.success);
-    state = await api.getState();
-    renderAll();
+    if (direction > 0) {
+      if (setupWizardStep === 1) validateWizardEngineStep();
+      if (setupWizardStep === 2) validateWizardSourcesStep();
+      if (setupWizardStep === 3) await validateWizardSettingsStep();
+    }
+    setupWizardStep = Math.max(1, Math.min(4, setupWizardStep + direction));
   } catch (error) {
-    showToast(error.message || String(error), true);
+    setupWizardError = error.message || String(error);
+    showToast(setupWizardError, true);
+  }
+  renderEngineOnboarding();
+  window.lucide?.createIcons();
+};
+
+$('#setup-wizard-next').addEventListener('click', () => void moveSetupWizard(1));
+$('#setup-wizard-back').addEventListener('click', () => void moveSetupWizard(-1));
+$('#wizard-add-subscription').addEventListener('click', () => {
+  syncWizardSourcesFromDom();
+  wizardSourceDraft.subscriptionUrls.push('');
+  wizardSourceDraft.subscriptionNames.push('');
+  renderWizardSubscriptionList();
+  window.lucide?.createIcons();
+  $$('[data-wizard-source-url]').at(-1)?.focus();
+});
+$('#wizard-choose-surge-profile').addEventListener('click', async () => {
+  const selectedPath = await api.chooseFile('surge-profile');
+  if (selectedPath) $('#wizard-surge-config-path').value = selectedPath;
+});
+$('#apply-wizard-recommendations').addEventListener('click', () => {
+  $('#wizard-policy-group-name').value = 'VLESS';
+  $('#wizard-port-start').value = '2081';
+  $('#wizard-backup-keep').value = '20';
+  $('#wizard-auto-reload').checked = true;
+  $('#wizard-tcp-fast-open').checked = true;
+  $('#wizard-udp-relay').checked = false;
+  $('#wizard-mihomo-auto-start').checked = true;
+  setupWizardError = '';
+  renderEngineOnboarding();
+  showToast('已应用稳定优先的推荐设置。');
+});
+$('#open-setup-wizard').addEventListener('click', () => {
+  setupWizardOpen = true;
+  setupWizardInitialized = false;
+  renderEngineOnboarding();
+  window.lucide?.createIcons();
+});
+$('#close-setup-wizard').addEventListener('click', () => {
+  setupWizardOpen = false;
+  setupWizardInitialized = false;
+  setupWizardError = '';
+  renderEngineOnboarding();
+});
+
+$('#confirm-engine-choice').addEventListener('click', async () => {
+  const targetMode = onboardingDraftMode;
+  const wasConfirmed = state.runtimeModeConfirmed;
+  const originalMode = state.config.runtimeMode;
+  setupWizardError = '';
+  setBusy(true, '正在保存并同步配置', false);
+  $('#engine-onboarding-status').textContent = '正在保存订阅、验证内核并执行同步…';
+  try {
+    validateWizardEngineStep();
+    const sources = validateWizardSourcesStep();
+    const settings = await validateWizardSettingsStep();
+    state = await api.saveSources(sources);
+    state = await api.saveSettings(settings);
+    const switchResult = await api.switchEngine(targetMode);
+    if (!switchResult.success) throw new Error(switchResult.message);
+    if (!wasConfirmed || originalMode === targetMode) {
+      const syncResult = await api.runAction('sync');
+      if (!syncResult.success) throw new Error(syncResult.message);
+    }
+    state = await api.getState();
+    setupWizardOpen = false;
+    setupWizardInitialized = false;
+    setupWizardError = '';
+    renderAll();
+    showToast('配置向导已完成，节点已同步到 Surge。');
+  } catch (error) {
+    setupWizardError = error.message || String(error);
+    state = await api.getState().catch(() => state);
+    setupWizardOpen = true;
+    renderAll();
+    showToast(setupWizardError, true);
   } finally {
     setBusy(false);
   }
 });
 
 document.addEventListener('click', async (event) => {
+  const wizardSourceRemove = event.target.closest('[data-wizard-source-remove]');
+  if (wizardSourceRemove) {
+    syncWizardSourcesFromDom();
+    const index = Number(wizardSourceRemove.dataset.wizardSourceRemove);
+    wizardSourceDraft.subscriptionUrls.splice(index, 1);
+    wizardSourceDraft.subscriptionNames.splice(index, 1);
+    renderWizardSubscriptionList();
+    window.lucide?.createIcons();
+  }
   const sourceAdd = event.target.closest('[data-source-add]');
   if (sourceAdd) addSourceRow(sourceAdd.dataset.sourceAdd);
   const sourceRemove = event.target.closest('[data-source-remove]');

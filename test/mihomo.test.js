@@ -217,7 +217,10 @@ test('desktop exposes runtime controls without exposing the controller secret', 
   assert.match(html, /id="onboarding-install-mihomo-direct"/);
   assert.match(html, /id="onboarding-install-mihomo-brew"/);
   assert.match(html, /id="onboarding-choose-mihomo"/);
-  assert.match(html, /先选择运行方式/);
+  assert.match(html, /id="onboarding-install-sing-box-direct"/);
+  assert.match(html, /id="onboarding-install-sing-box-brew"/);
+  assert.match(html, /id="onboarding-choose-sing-box"/);
+  assert.match(html, /配置向导/);
   assert.match(html, /保留 Surge external 写法/);
   assert.match(html, /由单个 Mihomo 后台进程承载全部节点/);
   assert.match(html, /适合节点较多，需要统一后台管理/);
@@ -226,7 +229,9 @@ test('desktop exposes runtime controls without exposing the controller secret', 
   assert.match(app, /api\.switchEngine/);
   assert.match(app, /state\.runtimeModeConfirmed/);
   assert.match(app, /const selectedMode = onboardingDraftMode;/);
-  assert.match(app, /busy \|\| !selectedMode \|\| \(mihomoSelected && !mihomoInstalled\)/);
+  assert.match(app, /setupWizardOpen/);
+  assert.match(app, /api\.saveSources\(sources\)/);
+  assert.match(app, /api\.runAction\('sync'\)/);
   assert.match(main, /minWidth:\s*720/);
   assert.doesNotMatch(types, /DesktopConfigView[\s\S]*controllerSecret:/);
 });

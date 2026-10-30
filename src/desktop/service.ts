@@ -777,14 +777,31 @@ export class DesktopService {
     if (this.operationRunning) return { success: false, message: '已有一个任务正在执行。', output: '' };
     this.operationRunning = true;
     const loaded = await this.loadConfig();
-    if (loaded.config.runtimeMode === targetMode && loaded.config.runtimeModeConfirmed) {
-      this.operationRunning = false;
-      return { success: true, message: '当前已经使用该运行引擎。', output: '' };
-    }
-    if (loaded.config.runtimeMode === 'external' && targetMode === 'external') {
+
+    if (!loaded.config.runtimeModeConfirmed) {
       try {
-        await this.updateConfig({ runtimeMode: 'external', runtimeModeConfirmed: true });
-        const message = '已确认使用 sing-box External。';
+        const dependency =
+          targetMode === 'mihomo'
+            ? (await this.mihomoStatus(loaded.config.mihomo.binary)).status
+            : (await this.singBoxStatus(loaded.config.singBoxBinary)).status;
+        const engineLabel = targetMode === 'mihomo' ? 'Mihomo' : 'sing-box';
+        if (!dependency.installed) {
+          throw new Error(`请先安装或选择 ${engineLabel} 可执行文件。`);
+        }
+        if (!dependency.currentVersion) {
+          throw new Error(`无法识别 ${engineLabel} 版本，请重新安装或选择正确的可执行文件。`);
+        }
+
+        const confirmedConfig =
+          targetMode === 'mihomo'
+            ? await persistMihomoControllerSecret({ config: loaded.config, configPath: loaded.configPath })
+            : loaded.config;
+        await this.updateConfig({
+          runtimeMode: targetMode,
+          runtimeModeConfirmed: true,
+          mihomo: confirmedConfig.mihomo,
+        });
+        const message = `已选择 ${targetMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}。`;
         await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message });
         return { success: true, message, output: message };
       } catch (error) {
@@ -794,6 +811,11 @@ export class DesktopService {
       } finally {
         this.operationRunning = false;
       }
+    }
+
+    if (loaded.config.runtimeMode === targetMode && loaded.config.runtimeModeConfirmed) {
+      this.operationRunning = false;
+      return { success: true, message: '当前已经使用该运行引擎。', output: '' };
     }
     const originalConfigExists = await pathExists(loaded.configPath);
     const originalConfigText = originalConfigExists ? await readTextFile(loaded.configPath) : undefined;

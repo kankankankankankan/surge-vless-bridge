@@ -162,7 +162,10 @@ test('unconfirmed runtime blocks writes and schedule activation until External i
   const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-runtime-confirmation-'));
   const configPath = path.join(root, 'config.json');
   const profilePath = path.join(root, 'profile.conf');
+  const singBoxPath = path.join(root, 'sing-box');
   await writeFile(profilePath, PROFILE_TEXT, 'utf8');
+  await writeFile(singBoxPath, '#!/bin/sh\necho "sing-box version 1.12.0"\n', 'utf8');
+  await chmod(singBoxPath, 0o755);
   await writeFile(
     configPath,
     JSON.stringify({
@@ -170,7 +173,7 @@ test('unconfirmed runtime blocks writes and schedule activation until External i
       runtimeModeConfirmed: false,
       vlessNodes: [vlessLink(1, 'Blocked')],
       surgeConfigPath: profilePath,
-      singBoxBinary: '/usr/bin/true',
+      singBoxBinary: singBoxPath,
       outputDir: path.join(root, 'nodes'),
       backupDir: path.join(root, 'backups'),
       subscriptionOutputPath: path.join(root, 'vless_nodes.txt'),
@@ -199,6 +202,47 @@ test('unconfirmed runtime blocks writes and schedule activation until External i
   assert.equal(confirmed.success, true);
   assert.equal((await service.getState()).runtimeModeConfirmed, true);
   assert.equal(JSON.parse(await readFile(configPath, 'utf8')).runtimeModeConfirmed, true);
+});
+
+test('first-time Mihomo confirmation does not require sources or a Surge profile', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-first-mihomo-'));
+  const configPath = path.join(root, 'config.json');
+  const mihomoPath = path.join(root, 'mihomo');
+  await writeFile(mihomoPath, '#!/bin/sh\necho "Mihomo Meta v1.19.33"\n', 'utf8');
+  await chmod(mihomoPath, 0o755);
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      runtimeMode: 'external',
+      runtimeModeConfirmed: false,
+      surgeConfigPath: '',
+      subscriptionUrls: [],
+      vlessNodes: [],
+      mihomo: { binary: mihomoPath, dataDir: path.join(root, 'mihomo-data') },
+    }),
+    'utf8',
+  );
+  let syncCalls = 0;
+  const service = new DesktopService({
+    configPath,
+    executablePath: '/usr/bin/node',
+    scheduledEntryPath: path.join(root, 'scheduled-run.js'),
+    dependencies: {
+      switchSync: async () => {
+        syncCalls += 1;
+        throw new Error('initial confirmation must not sync');
+      },
+    },
+  });
+
+  const result = await service.switchEngine('mihomo');
+  const saved = JSON.parse(await readFile(configPath, 'utf8'));
+
+  assert.equal(result.success, true);
+  assert.equal(syncCalls, 0);
+  assert.equal(saved.runtimeMode, 'mihomo');
+  assert.equal(saved.runtimeModeConfirmed, true);
+  assert.ok(saved.mihomo.controllerSecret);
 });
 
 test('engine switch restores config, Surge text and an installed stopped service when saving fails', async () => {
@@ -490,15 +534,23 @@ test('desktop prioritizes engine selection and keeps narrow layouts usable', asy
   const app = await readFile(path.join(__dirname, '..', 'desktop', 'app.js'), 'utf8');
 
   assert.match(html, /id="engine-onboarding"[^>]*role="dialog"[^>]*aria-modal="true"/);
-  assert.match(html, /id="confirm-engine-choice"[^>]*disabled/);
+  assert.match(html, /id="confirm-engine-choice"[^>]*class="button primary hidden"/);
   assert.match(css, /\.engine-onboarding \{ position: fixed; inset: 0; z-index: 110;/);
-  assert.match(css, /\.engine-onboarding-panel \{[^}]*max-height: calc\(100vh - 64px\);[^}]*overflow: auto;/);
+  assert.match(css, /\.engine-onboarding-panel \{[^}]*grid-template-rows: auto auto minmax\(0, 1fr\) auto;[^}]*overflow: hidden;/);
+  assert.match(css, /\.setup-step \{[^}]*min-height: 0;[^}]*overflow: auto;/);
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.app-shell \{ grid-template-columns: 76px 1fr; \}/);
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.nav-item span \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 820px\)[\s\S]*?\.engine-choice-grid, \.engine-switch-grid, \.field-grid\.two \{ grid-template-columns: 1fr; \}/);
   assert.match(css, /\.engine-summary strong, \.service-status strong \{[^}]*overflow-wrap: anywhere;/);
   assert.match(app, /document\.body\.classList\.toggle\('engine-choice-required', visible\)/);
-  assert.match(app, /if \(!onboardingDraftMode\) return;/);
+  assert.match(app, /const validateWizardEngineStep/);
+  assert.match(app, /const validateWizardSourcesStep/);
+  assert.match(app, /const validateWizardSettingsStep/);
+  assert.match(html, /id="onboarding-install-sing-box-direct"/);
+  assert.match(html, /id="open-setup-wizard"/);
+  assert.match(html, /id="setup-step-sources"/);
+  assert.match(html, /id="setup-step-settings"/);
+  assert.match(html, /id="setup-step-review"/);
 });
 
 test('desktop settings preserve editable DNS resolver values', async () => {
