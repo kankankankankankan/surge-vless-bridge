@@ -184,6 +184,7 @@
             </div>
           </section>
 
+          <div id="subscription-warning" class="subscription-warning hidden" role="status"><span id="subscription-warning-text"></span><button class="text-button" data-go="sources">查看来源</button></div>
           <div class="overview-columns">
             <section id="environment-panel" class="section-block">
               <div class="section-heading"><div><h2>环境检查与修复</h2><p id="doctor-summary">正在读取</p></div><button class="icon-button" data-action="doctor" title="重新检查"><i data-lucide="refresh-cw"></i></button></div>
@@ -195,6 +196,17 @@
               <div id="recent-activity" class="activity-list compact"></div>
             </section>
           </div>
+
+          <section id="node-diagnostics" class="section-block hidden">
+            <div class="section-heading"><div><h2>节点连通诊断</h2><p>测试本机 Mihomo 到目标的 TCP/UDP 链路，不经过 Surge。结果仅代表本次测试。</p></div></div>
+            <div class="diagnostic-controls">
+              <label for="diagnostic-node">已同步节点</label>
+              <select id="diagnostic-node"></select>
+              <button id="diagnose-node" class="button secondary" type="button"><i data-lucide="activity"></i><span>检测节点</span></button>
+            </div>
+            <p id="diagnostic-empty" class="form-meta hidden">同步节点后可检测。</p>
+            <div id="diagnostic-result" class="diagnostic-result" role="status" aria-live="polite"></div>
+          </section>
 
           <section class="section-block action-strip">
             <div><h2>维护</h2><p>备份、重建和恢复都使用现有 CLI 核心。</p></div>
@@ -214,6 +226,7 @@
                 <div class="heading-actions"><button id="add-subscription" type="button" class="button secondary compact-button"><i data-lucide="plus"></i><span>添加订阅</span></button><button id="toggle-secrets" type="button" class="icon-button" title="显示或隐藏敏感内容"><i data-lucide="eye"></i></button></div>
               </div>
               <div id="subscription-list" class="source-list"></div>
+              <div id="subscription-statuses" class="subscription-statuses" role="status"></div>
             </section>
 
             <section class="section-block form-section">

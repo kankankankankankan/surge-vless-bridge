@@ -72,12 +72,14 @@ const getLatestRelease = async () => {
   return release;
 };
 
-const readVersion = async (binaryPath: string) => {
+export const readMihomoVersion = async (binaryPath: string) => {
   const result = await execFileAsync(binaryPath, ['-v'], { encoding: 'utf8', timeout: 15_000 });
   const version = normalizeMihomoVersion(`${result.stdout}\n${result.stderr}`);
   if (!version) throw new Error('无法识别 Mihomo 版本。');
   return version;
 };
+
+const readVersion = readMihomoVersion;
 
 const sourceFor = ({ binaryPath, managedPath, brewPath }: { binaryPath: string; managedPath: string; brewPath?: string }) => {
   if (!binaryPath) return 'missing' as const;
@@ -112,7 +114,11 @@ export const inspectMihomoVersion = async ({
   };
 };
 
-export const installOfficialMihomo = async (installDir: string, reportProgress?: InstallProgressReporter) => {
+export const installOfficialMihomo = async (
+  installDir: string,
+  reportProgress?: InstallProgressReporter,
+  validateCandidate?: (path: string) => Promise<void>,
+) => {
   reportProgress?.({
     target: 'mihomo',
     method: 'direct',
@@ -176,34 +182,40 @@ export const installOfficialMihomo = async (installDir: string, reportProgress?:
     detail: asset.name,
     percent: 76,
   });
-  await writeFile(nextPath, await gunzipAsync(bytes));
-  await chmod(nextPath, 0o755);
-  reportProgress?.({
-    target: 'mihomo',
-    method: 'direct',
-    phase: 'validating',
-    message: '正在验证新版本',
-    detail: '读取 Mihomo 版本信息',
-    percent: 90,
-  });
-  const version = await readVersion(nextPath);
-  const previousVersion = (await pathExists(targetPath)) ? await readVersion(targetPath).catch(() => undefined) : undefined;
-  if (await pathExists(targetPath)) await copyFile(targetPath, previousPath);
-  reportProgress?.({
-    target: 'mihomo',
-    method: 'direct',
-    phase: 'installing',
-    message: '正在安装 Mihomo',
-    detail: `目标位置：${targetPath}`,
-    percent: 96,
-  });
-  await rename(nextPath, targetPath);
-  return {
-    path: targetPath,
-    version,
-    previousVersion,
-    output: `来源：MetaCubeX/mihomo ${release.tag_name}\n文件：${asset.name}\nSHA-256：已验证\n安装位置：${targetPath}`,
-  };
+  try {
+    await writeFile(nextPath, await gunzipAsync(bytes), { mode: 0o700 });
+    await chmod(nextPath, 0o755);
+    reportProgress?.({
+      target: 'mihomo',
+      method: 'direct',
+      phase: 'validating',
+      message: '正在验证新版本',
+      detail: '读取 Mihomo 版本信息',
+      percent: 90,
+    });
+    const version = await readVersion(nextPath);
+    if (version !== normalizeMihomoVersion(release.tag_name)) throw new Error('Mihomo 文件版本与官方发布版本不一致。');
+    await validateCandidate?.(nextPath);
+    const previousVersion = (await pathExists(targetPath)) ? await readVersion(targetPath).catch(() => undefined) : undefined;
+    if (await pathExists(targetPath)) await copyFile(targetPath, previousPath);
+    reportProgress?.({
+      target: 'mihomo',
+      method: 'direct',
+      phase: 'installing',
+      message: '正在安装 Mihomo',
+      detail: `目标位置：${targetPath}`,
+      percent: 92,
+    });
+    await rename(nextPath, targetPath);
+    return {
+      path: targetPath,
+      version,
+      previousVersion,
+      output: `来源：MetaCubeX/mihomo ${release.tag_name}\n文件：${asset.name}\nSHA-256：已验证\n安装位置：${targetPath}`,
+    };
+  } finally {
+    await rm(nextPath, { force: true });
+  }
 };
 
 export const installMihomoWithHomebrew = async (reportProgress?: InstallProgressReporter) => {

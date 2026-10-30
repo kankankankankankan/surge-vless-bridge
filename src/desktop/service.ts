@@ -29,10 +29,9 @@ import {
 } from './dependencies';
 import {
   inspectMihomoVersion,
-  installMihomoWithHomebrew,
-  installOfficialMihomo,
   rollbackOfficialMihomo,
 } from '../mihomo/dependencies';
+import { installAndVerifyMihomo } from '../mihomo/update';
 import {
   getMihomoServiceStatus,
   installMihomoLaunchAgent,
@@ -40,6 +39,9 @@ import {
   stopMihomoLaunchAgent,
 } from '../mihomo/launch-agent';
 import { readMihomoNodes } from '../mihomo/sync';
+import { diagnoseMihomoNode } from '../mihomo/probe';
+import { pruneSubscriptionCache, readSubscriptionStatuses } from '../utils/subscription-cache';
+import { withBridgeOperation, withDirectoryLock } from '../utils/operation-lock';
 import type { InstallProgressEvent, InstallProgressReporter } from '../install-progress';
 import { LAUNCH_AGENT_LABEL, LaunchAgentScheduler } from './scheduler';
 import { clearHistory, readHistory, readLogTail, recordActivity } from './storage';
@@ -209,7 +211,11 @@ export class DesktopService {
     const subscriptionNames = subscriptions.map((entry) => entry.name);
     const vlessNodes = uniqueLines(input.vlessNodes);
     validateSources(subscriptionUrls, vlessNodes);
-    await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, subscriptionNames, vlessNodes });
+    const loaded = await this.loadConfig();
+    await withDirectoryLock(join(loaded.config.outputDir, '.subscription-operation.lock'), async () => {
+      await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, subscriptionNames, vlessNodes });
+      await pruneSubscriptionCache(loaded.config, subscriptionUrls);
+    });
     return this.getState();
   }
 
@@ -424,6 +430,8 @@ export class DesktopService {
       history,
       schedule,
       schedulerLog,
+      subscriptionStatuses,
+      diagnosticNodes,
     ] = await Promise.all([
       this.singBoxStatus(loaded.config.singBoxBinary),
       this.mihomoStatus(loaded.config.mihomo.binary),
@@ -438,6 +446,10 @@ export class DesktopService {
       readHistory(this.historyPath),
       this.scheduler.getSettings(),
       readLogTail(this.schedulerLogPath),
+      readSubscriptionStatuses(loaded.config, [loaded.config.subscriptionUrl, ...(loaded.config.subscriptionUrls ?? [])].filter((value): value is string => Boolean(value))),
+      loaded.config.runtimeMode === 'mihomo'
+        ? readMihomoNodes(loaded.config).then(nodes => nodes.map(({ name, port }) => ({ name, port }))).catch(() => [])
+        : Promise.resolve([]),
     ]);
 
     return {
@@ -483,6 +495,8 @@ export class DesktopService {
       },
       doctor: doctorCapture.result,
       nodeCount,
+      subscriptionStatuses,
+      diagnosticNodes,
       backups: backups.slice(0, 20),
       history,
       schedule,
@@ -695,6 +709,21 @@ export class DesktopService {
     return (await this.mihomoStatus(loaded.config.mihomo.binary, true)).status;
   }
 
+  async diagnoseNode(input: { port: number; name: string }) {
+    if (this.operationRunning) throw new Error('已有一个任务正在执行。');
+    this.operationRunning = true;
+    try {
+      const { config } = await this.loadConfig();
+      assertRuntimeModeConfirmed(config);
+      if (config.runtimeMode !== 'mihomo') throw new Error('节点诊断目前用于 Mihomo 后端。');
+      return await withBridgeOperation(config, async () => {
+        const nodes = await readMihomoNodes(config);
+        if (!input || !Number.isInteger(input.port) || !nodes.some(node => node.port === input.port && node.name === input.name)) throw new Error('节点已变化，请刷新后重试。');
+        return diagnoseMihomoNode({ port: input.port, udpEnabled: config.udpRelay, udpTarget: config.udpTestTarget });
+      });
+    } finally { this.operationRunning = false; }
+  }
+
   async installMihomo(method: MihomoInstallMethod): Promise<ActionResult> {
     if (this.operationRunning) return { success: false, message: '已有一个任务正在执行。', output: '' };
     this.operationRunning = true;
@@ -702,13 +731,16 @@ export class DesktopService {
     try {
       const loaded = await this.loadConfig();
       const before = await this.mihomoStatus(loaded.config.mihomo.binary);
-      const result =
-        method === 'direct'
-          ? await installOfficialMihomo(join(dirname(this.configPath), 'bin'), (event) => this.emitInstallProgress(event))
-          : await installMihomoWithHomebrew((event) => this.emitInstallProgress(event));
-      await this.updateConfig({ mihomo: { ...loaded.config.mihomo, binary: result.path } });
+      const result = await withBridgeOperation(loaded.config, () => installAndVerifyMihomo({
+        config: loaded.config,
+        installDir: join(dirname(this.configPath), 'bin'),
+        method,
+        reportProgress: event => this.emitInstallProgress(event),
+        saveBinaryPath: binary => this.updateConfig({ mihomo: { ...loaded.config.mihomo, binary } }),
+      }));
       activityAction = before.status.installed ? 'update-mihomo' : 'install-mihomo';
-      const message = before.status.installed ? `Mihomo 已更新到 ${result.version}。` : `Mihomo ${result.version} 已安装。`;
+      const message = `${before.status.installed ? 'Mihomo 已更新到' : 'Mihomo 已安装'} ${result.version}。${result.runtimeVerified
+        ? '运行版本已验证。' : '服务未启动，运行状态尚未验证。'}`;
       await recordActivity(this.historyPath, { action: activityAction, success: true, message, output: result.output });
       this.emitInstallProgress({
         target: 'mihomo',

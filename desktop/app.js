@@ -60,6 +60,7 @@ let secretsVisible = false;
 let sourcesDirty = false;
 let singBoxUpdateChecked = false;
 let mihomoUpdateChecked = false;
+let diagnosticResult;
 let engineDraftMode = 'external';
 let onboardingDraftMode;
 let engineOnboardingVisible = false;
@@ -238,6 +239,7 @@ const applyInteractionLocks = () => {
   $('#clear-history').disabled = busy || state.history.length === 0;
   $('#clean-old-backups').disabled = busy || state.backups.length <= 1;
   if ($('#policy-group-options')) updatePolicyGroupSummary();
+  renderDiagnostics();
   renderEngineOnboarding();
 };
 
@@ -300,7 +302,25 @@ const setWorkflowState = (name, status, detail) => {
   $(`#workflow-${name}`).textContent = detail;
 };
 
+const renderDiagnostics = () => {
+  const nodes = state.diagnosticNodes || [];
+  $('#node-diagnostics').classList.toggle('hidden', state.config.runtimeMode !== 'mihomo');
+  const select = $('#diagnostic-node');
+  const previous = select.value;
+  select.innerHTML = nodes.map(node => `<option value="${node.port}">${escapeHtml(node.name)}</option>`).join('');
+  if (nodes.some(node => String(node.port) === previous)) select.value = previous;
+  $('#diagnostic-empty').classList.toggle('hidden', nodes.length > 0);
+  $('#diagnose-node').disabled = busy || !state.runtimeModeConfirmed || nodes.length === 0;
+  select.disabled = busy || nodes.length === 0;
+  if (diagnosticResult && (state.config.runtimeMode !== 'mihomo' ||
+      !nodes.some(node => node.port === diagnosticResult.port && node.name === diagnosticResult.name))) {
+    diagnosticResult = undefined;
+    $('#diagnostic-result').textContent = '';
+  }
+};
+
 const renderOverview = () => {
+  renderDiagnostics();
   const runtimeModeConfirmed = state.runtimeModeConfirmed;
   const sourceReady = checkByLabel('nodeSources')?.level === 'ok';
   const binaryLabel = state.config.runtimeMode === 'mihomo' ? 'mihomoBinary' : 'singBoxBinary';
@@ -420,6 +440,10 @@ const renderOverview = () => {
       return `<div class="check-row ${check.level}"><i data-lucide="${icon}"></i><span class="check-label">${escapeHtml(labelMap[check.label] || check.label)}</span><span class="check-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span><span class="check-action">${doctorAction(check)}</span></div>`;
     })
     .join('');
+
+  const staleSources = (state.subscriptionStatuses || []).filter(status => status && status.state !== 'fresh');
+  $('#subscription-warning').classList.toggle('hidden', staleSources.length === 0);
+  $('#subscription-warning-text').textContent = `${staleSources.length} 个订阅更新失败，请在订阅来源中查看缓存时间和原因。`;
 
   renderActivityList($('#recent-activity'), state.history.slice(0, 5), true);
 };
@@ -627,6 +651,7 @@ const renderSourceList = (container, values, kind, names = []) => {
 };
 
 const renderSourceMeta = () => {
+  $('#subscription-statuses').classList.toggle('hidden', sourcesDirty);
   const meta = $('#source-count');
   const count = `${sourceDraft.subscriptionUrls.filter(Boolean).length} 个订阅，${sourceDraft.vlessNodes.filter(Boolean).length} 个直接节点`;
   meta.textContent = sourcesDirty ? `${count} · 有未保存修改` : count;
@@ -634,6 +659,15 @@ const renderSourceMeta = () => {
 };
 
 const renderSources = () => {
+  $('#subscription-statuses').innerHTML = (state.subscriptionStatuses || []).map((status, index) => {
+    if (!status || sourcesDirty) return '';
+    const name = state.config.subscriptionNames[index] || `订阅 ${index + 1}`;
+    const description = status.state === 'cached'
+      ? `更新失败，使用 ${formatDate(status.lastSuccessAt)} 的缓存（${status.count} 个节点）。${status.detail || ''}`
+      : status.state === 'failed' ? `更新失败，无可用缓存。${status.detail || ''}`
+      : `${status.count} 个节点 · 更新于 ${formatDate(status.lastSuccessAt)}`;
+    return `<p class="${status.state === 'fresh' ? '' : 'status-warning'}"><strong>${escapeHtml(name)}</strong> ${escapeHtml(description)}</p>`;
+  }).join('');
   renderSourceList($('#subscription-list'), sourceDraft.subscriptionUrls, 'subscription', sourceDraft.subscriptionNames);
   renderSourceList($('#vless-node-list'), sourceDraft.vlessNodes, 'vless');
   renderSourceMeta();
@@ -1528,6 +1562,35 @@ $('#install-sing-box-direct').addEventListener('click', () => installSingBox('di
 $('#install-sing-box-brew').addEventListener('click', () => installSingBox('homebrew'));
 $('#check-sing-box-update').addEventListener('click', () => refreshSingBoxStatus(true));
 $('#rollback-sing-box').addEventListener('click', rollbackSingBox);
+$('#diagnostic-node').addEventListener('change', () => {
+  diagnosticResult = undefined;
+  $('#diagnostic-result').textContent = '';
+});
+$('#diagnose-node').addEventListener('click', async () => {
+  if (busy) return;
+  const port = Number($('#diagnostic-node').value);
+  const node = state.diagnosticNodes?.find(node => node.port === port);
+  if (!node) return;
+  setBusy(true, '正在检测节点', false);
+  $('#diagnostic-result').textContent = '正在检测 TCP 与 UDP…';
+  renderDiagnostics();
+  try {
+    const result = await api.diagnoseNode({ port, name: node.name });
+    diagnosticResult = { ...result, port, name: node.name };
+    $('#diagnostic-result').innerHTML = `<p><strong>${escapeHtml(node.name)}</strong> · ${escapeHtml(formatDate(result.testedAt))}</p>` +
+      ['tcp', 'udp'].map(protocol => {
+        const part = result[protocol];
+        const status = part.skipped ? '未检测' : part.success ? '通过' : '失败';
+        return `<div class="diagnostic-part"><strong>${protocol.toUpperCase()} ${status}</strong><span>${escapeHtml(part.detail)}</span><small>${escapeHtml(part.target)} · ${part.latencyMs} ms</small></div>`;
+      }).join('');
+  } catch (error) {
+    $('#diagnostic-result').textContent = error.message || '检测失败，请刷新后重试。';
+  } finally {
+    setBusy(false);
+    renderDiagnostics();
+  }
+});
+
 $('#install-mihomo-direct').addEventListener('click', () => installMihomo('direct'));
 $('#install-mihomo-brew').addEventListener('click', () => installMihomo('homebrew'));
 $('#check-mihomo-update').addEventListener('click', () => refreshMihomoStatus(true));

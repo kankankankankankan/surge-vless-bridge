@@ -3,6 +3,8 @@ import type { SingBoxVersionStatus } from './dependencies';
 import type { MihomoVersionStatus } from '../mihomo/dependencies';
 import type { MihomoServiceStatus } from '../mihomo/launch-agent';
 import type { InstallProgressEvent } from '../install-progress';
+import type { SubscriptionStatus } from '../utils/subscription-cache';
+import type { diagnoseMihomoNode } from '../mihomo/probe';
 
 export type DesktopAction = 'doctor' | 'preview' | 'sync' | 'rebuild' | 'restore' | 'clean';
 
@@ -118,6 +120,8 @@ export type DesktopState = {
     warnings: number;
   };
   nodeCount: number;
+  subscriptionStatuses: Array<SubscriptionStatus | undefined>;
+  diagnosticNodes: Array<{ name: string; port: number }>;
   backups: BackupView[];
   history: ActivityEntry[];
   schedule: ScheduleSettings;
@@ -176,6 +180,7 @@ export type ActionResult = {
 export type DesktopApi = {
   getVersion: () => Promise<string>;
   getState: () => Promise<DesktopState>;
+  diagnoseNode: (input: { port: number; name: string }) => ReturnType<typeof diagnoseMihomoNode>;
   inspectPolicyGroups: (input: { surgeConfigPath: string; policyGroupName: string }) => Promise<PolicyGroupView[]>;
   saveSources: (input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) => Promise<DesktopState>;
   saveSettings: (input: DesktopConfigView) => Promise<DesktopState>;

@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
 import { chmod, mkdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import type { CliConfig } from '../types/cli-config';
 import { pathExists, writeTextFile } from '../utils/fs';
+import { normalizeMihomoVersion } from './dependencies';
 
 const execFileAsync = promisify(execFile);
 export const MIHOMO_LAUNCH_AGENT_LABEL = 'com.chen86860.surge-vless-bridge.mihomo';
@@ -59,35 +60,74 @@ export type MihomoServiceStatus = {
   loaded: boolean;
   pid?: number;
   controllerReady: boolean;
+  runningVersion?: string;
+  serviceMatchesConfig?: boolean;
+};
+
+export const matchesMihomoLaunchService = (output: string, config: CliConfig) => {
+  const program = output.match(/^\s*program\s*=\s*(.+)$/m)?.[1]?.trim().replace(/^"|"$/g, '');
+  const args = output.match(/\barguments\s*=\s*\{([\s\S]*?)\}/)?.[1]
+    ?.split('\n').map((line) => line.trim().replace(/^"|"$/g, '')).filter(Boolean) ?? [];
+  const dataIndex = args.indexOf('-d');
+  const configIndex = args.indexOf('-f');
+  return Boolean(program && resolve(program) === resolve(config.mihomo.binary)
+    && dataIndex >= 0 && args[dataIndex + 1] === config.mihomo.dataDir
+    && configIndex >= 0 && args[configIndex + 1] === join(config.mihomo.dataDir, 'config.yaml'));
 };
 
 export const getMihomoServiceStatus = async (config: CliConfig): Promise<MihomoServiceStatus> => {
   const launchAgentPath = defaultMihomoLaunchAgentPath();
   let loaded = false;
   let pid: number | undefined;
+  let serviceMatchesConfig = false;
   if (process.platform === 'darwin') {
     try {
       const result = await launchctl(['print', `${launchDomain()}/${MIHOMO_LAUNCH_AGENT_LABEL}`]);
       loaded = true;
       const match = result.stdout.match(/\bpid\s*=\s*(\d+)/);
       pid = match ? Number(match[1]) : undefined;
+      serviceMatchesConfig = matchesMihomoLaunchService(result.stdout, config);
     } catch {
       loaded = false;
     }
   }
 
   let controllerReady = false;
+  let runningVersion: string | undefined;
   try {
     const response = await fetch(`http://${config.mihomo.controllerHost}:${config.mihomo.controllerPort}/version`, {
       headers: { Authorization: `Bearer ${config.mihomo.controllerSecret}` },
       signal: AbortSignal.timeout(1_500),
     });
     controllerReady = response.ok;
+    if (response.ok) {
+      const body = await response.json() as { version?: unknown };
+      if (typeof body.version === 'string') runningVersion = normalizeMihomoVersion(body.version);
+    }
   } catch {
     controllerReady = false;
   }
 
-  return { installed: await pathExists(launchAgentPath), loaded, pid, controllerReady };
+  return { installed: await pathExists(launchAgentPath), loaded, pid, controllerReady, runningVersion, serviceMatchesConfig };
+};
+
+export const waitForMihomoRuntime = async (config: CliConfig, version: string, timeoutMs = 15_000) => {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const status = await getMihomoServiceStatus(config);
+    if (status.loaded && status.pid && status.serviceMatchesConfig && status.controllerReady && status.runningVersion === version) {
+      try {
+        // A matching version alone could belong to an unrelated controller on the same port.
+        const owner = await execFileAsync('/usr/sbin/lsof', ['-nP', '-a', '-p', String(status.pid),
+          `-iTCP:${config.mihomo.controllerPort}`, '-sTCP:LISTEN', '-Fp'], { encoding: 'utf8', timeout: 2_000 });
+        if (owner.stdout.split('\n').includes(`p${status.pid}`)) return;
+      } catch {
+        // Wait for the managed process to acquire its controller listener.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  } while (Date.now() < deadline);
+  throw new Error('Mihomo 运行验证失败：服务归属、Controller 就绪状态或运行版本不匹配。');
 };
 
 export const installMihomoLaunchAgent = async (config: CliConfig) => {

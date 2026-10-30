@@ -104,6 +104,7 @@ const registerIpc = () => {
   ipcMain.handle('desktop:check-sing-box-update', () => service.checkSingBoxUpdate());
   ipcMain.handle('desktop:rollback-sing-box', () => service.rollbackSingBox());
   ipcMain.handle('desktop:install-mihomo', (_event, method: MihomoInstallMethod) => service.installMihomo(method));
+  ipcMain.handle('desktop:diagnose-node', (_event, input: { port: number; name: string }) => service.diagnoseNode(input));
   ipcMain.handle('desktop:check-mihomo-update', () => service.checkMihomoUpdate());
   ipcMain.handle('desktop:rollback-mihomo', () => service.rollbackMihomo());
   ipcMain.handle('desktop:control-mihomo', (_event, action: MihomoServiceAction) => service.controlMihomo(action));

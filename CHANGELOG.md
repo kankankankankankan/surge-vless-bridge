@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [1.7.0] - 2026-10-31
+
+### Added
+
+- Preserve each subscription's last successfully parsed nodes on fetch/parse failure, with private atomic caches, timestamps and visible stale-data warnings. Valid empty subscriptions and explicitly removed sources discard their prior nodes.
+- Add on-demand Mihomo SOCKS5 TCP/TLS/HTTP and UDP DNS diagnostics with stage-specific results in the desktop overview.
+- Validate managed Mihomo candidates against the current configuration, verify the running version and process ownership after updates, and restore the previous files and service when verification fails. Homebrew rollback limitations are reported explicitly.
+- Coordinate sync, diagnostics and updates with filesystem locks and validate node identity before diagnostics.
+- Credit ssfun's Surge External Bridge and its architecture and update documentation.
+
 ## [1.6.3] - 2026-10-31
 
 ### Fixed

@@ -5,6 +5,7 @@ import type { DesktopApi } from './types';
 const api: DesktopApi = {
   getVersion: () => ipcRenderer.invoke('desktop:get-version'),
   getState: () => ipcRenderer.invoke('desktop:get-state'),
+  diagnoseNode: (input) => ipcRenderer.invoke('desktop:diagnose-node', input),
   inspectPolicyGroups: (input) => ipcRenderer.invoke('desktop:inspect-policy-groups', input),
   saveSources: (input) => ipcRenderer.invoke('desktop:save-sources', input),
   saveSettings: (input) => ipcRenderer.invoke('desktop:save-settings', input),

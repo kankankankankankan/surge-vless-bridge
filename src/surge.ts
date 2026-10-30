@@ -9,6 +9,8 @@ import { promisify } from 'node:util';
 
 import { getVlessSubscriptionNodes } from './parse';
 import { SubscriptionError } from './utils/subscription-error';
+import { pruneSubscriptionCache, readSubscriptionCache, writeSubscriptionCache } from './utils/subscription-cache';
+import { withDirectoryLock } from './utils/operation-lock';
 import type { AddressResolverConfig, CliConfig, PolicyGroupTargetMode } from './types/cli-config';
 import type { SingBoxVlessOutbound } from './types/sing-box-vless-outbound';
 import { parseTemplate } from './utils/parse-template';
@@ -188,39 +190,45 @@ export const getConfiguredVlessNodes = (config: CliConfig) =>
     .filter((node): node is string => typeof node === 'string' && node.trim() !== '')
     .map((node) => node.trim());
 
-const describeSubscriptionSource = (subscriptionUrl: string) => {
-  try {
-    const url = new URL(subscriptionUrl);
-    return url.protocol === 'data:' ? 'data: URL' : url.origin;
-  } catch {
-    return 'subscription URL';
-  }
-};
-
-export const collectVlessNodes = async (config: CliConfig) => {
+export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(config.outputDir, '.subscription-operation.lock'), async () => {
   const subscriptionUrls = getSubscriptionUrls(config);
   const failures: string[] = [];
+  await pruneSubscriptionCache(config, subscriptionUrls);
   const describeSubscription = (index: number) => `Subscription ${index + 1} of ${subscriptionUrls.length}`;
   const vlessNodesBySubscription = await Promise.all(
     subscriptionUrls.map(async (subscriptionUrl, index) => {
+      const previous = await readSubscriptionCache(config, subscriptionUrl);
+      const checkedAt = new Date().toISOString();
+      let nodes: string[];
       try {
-        const nodes = await getVlessSubscriptionNodes({
+        nodes = await getVlessSubscriptionNodes({
           subscriptionUrl,
           requestHeaders: config.requestHeaders,
         });
-        if (nodes.length === 0) {
-          failures[index] = `订阅 ${index + 1}：已识别订阅，但没有 VLESS 节点。`;
-          console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
-        }
-        return nodes;
+        nodes.forEach((node, nodeIndex) => parseVlessNode(node, nodeIndex));
       } catch (error) {
         const detail = error instanceof SubscriptionError ? error.message : '订阅读取失败。';
         failures[index] = `订阅 ${index + 1}：${detail}`;
-        console.warn(
-          `${describeSubscription(index)} (${describeSubscriptionSource(subscriptionUrl)}) failed and was skipped: ${detail}`,
-        );
-        return [];
+        const cached = previous?.lastSuccessAt ? previous.nodes : [];
+        await writeSubscriptionCache(config, subscriptionUrl, {
+          version: 1, nodes: cached, count: cached.length, checkedAt,
+          lastSuccessAt: previous?.lastSuccessAt,
+          state: previous?.lastSuccessAt ? 'cached' : 'failed', detail,
+        });
+        console.warn(`${describeSubscription(index)}: ${detail}${previous?.lastSuccessAt
+          ? ` 使用 ${previous.lastSuccessAt} 的缓存（${cached.length} 个节点）。`
+          : ' 无可用缓存，已跳过。'}`);
+        return cached;
       }
+      // A valid empty document replaces the old snapshot; only failures use cached nodes.
+      await writeSubscriptionCache(config, subscriptionUrl, {
+        version: 1, nodes, count: nodes.length, checkedAt, lastSuccessAt: checkedAt, state: 'fresh',
+      });
+      if (nodes.length === 0) {
+        failures[index] = `订阅 ${index + 1}：已识别订阅，但没有 VLESS 节点。`;
+        console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
+      }
+      return nodes;
     }),
   );
 
@@ -231,7 +239,7 @@ export const collectVlessNodes = async (config: CliConfig) => {
     throw new Error(['No VLESS nodes from any configured source; refusing to update the Surge profile.', ...failures.filter(Boolean)].join('\n'));
   }
   return nodes;
-};
+});
 
 const resolveAddresses = async (server: string, resolverConfig: AddressResolverConfig) => {
   if (resolverConfig.strategy === 'off') {

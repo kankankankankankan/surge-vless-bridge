@@ -2,7 +2,7 @@
 
 更新时间：2026-10-31
 
-适用版本：`1.6.3`
+适用版本：`1.7.0`
 
 本文是当前双引擎实现的主开发文档。所有结论以当前工作区源码、测试和构建配置为准。接手开发前先阅读根目录 `AGENTS.md`，再检查 `git status --short` 和实际差异。
 
@@ -61,7 +61,7 @@ subscriptionUrl / subscriptionUrls / vlessNodes
 按 runtimeMode 进入 External 或 Mihomo
 ```
 
-订阅下载失败时，日志只记录订阅序号和来源站点，不输出完整 URL。某个来源为空或失败时继续处理其他来源。全部来源都没有可用 VLESS 节点时终止同步。
+订阅下载失败时，日志使用订阅序号和安全原因，不输出完整 URL。`1.7.0` 会按来源保留最后成功解析的缓存，并显示缓存时间；无缓存的失败来源被跳过。有效空来源会更新为空，全部来源及缓存都没有可用 VLESS 节点时终止同步。缓存保存的是成功解析的订阅内容，不代表节点通过真实连通测试。
 
 `1.6.3` 输入支持原始链接列表、Base64（含 URL-safe）链接列表、Clash YAML/JSON 的 `proxies` 及 Base64 编码的 Clash 文档。仅导入 VLESS 节点，不导入订阅中的规则、DNS 或监听设置。只有 `proxy-providers` 的配置需要用户提供 provider 地址，不自动递归下载。Base64 属于编码，不能据此声称支持任意加密订阅。
 
@@ -422,8 +422,8 @@ LaunchAgent label：`com.chen86860.surge-vless-bridge.sync`
 2. `x64` 选择 `darwin-amd64-compatible`。
 3. `arm64` 选择 `darwin-arm64`。
 4. 校验响应大小和官方 SHA-256 digest。
-5. 解压后执行版本读取。
-6. 更新前保存 `mihomo.previous`。
+5. 解压后核对版本与 Release 标签，并校验已有 YAML。
+6. 更新前保留旧文件，运行服务更新后核对进程归属与运行版本，失败恢复，详见第 21 节。
 
 托管版回退会交换当前和上一版二进制。当前运行模式为 Mihomo 时，桌面随后重启 LaunchAgent。自定义路径和 Homebrew 版本没有项目托管的上一版文件。
 
@@ -638,7 +638,7 @@ rg -n 'Bearer |PRIVATE KEY|controllerSecret|subscriptionUrl|vless://' docs/dual-
 
 ## 16. 已知限制
 
-1. 桌面 `operationRunning` 没有覆盖定时同步或其他进程。
+1. 同步、重建、清理、诊断和 Mihomo 更新已使用跨进程锁；模式切换全流程、手动恢复与独立服务按钮尚未统一纳入完整事务。
 2. 模式切换没有跨进程事务文件和启动恢复状态机。
 3. External 在提升节点配置后的少数写入失败场景缺少完整文件级回滚。
 4. External 正式同步可能在后续失败前更新订阅缓存。
@@ -647,7 +647,7 @@ rg -n 'Bearer |PRIVATE KEY|controllerSecret|subscriptionUrl|vless://' docs/dual-
 7. 历史和备份界面只展示 Surge 备份，未统一展示 Mihomo YAML 和切换状态。
 8. `clean` 会保留日志、二进制、订阅缓存和备份，需要用户明确决定后再扩展清理范围。
 9. Mihomo doctor 只验证配置、LaunchAgent、Controller 和 TCP listener。
-10. 远端节点连通、HTTP 请求、UDP ASSOCIATE 和 UDP DNS 尚无分层诊断。
+10. Mihomo 已有按需 TCP/UDP 分层诊断；External 和经过 Surge 的整条链路尚未覆盖。
 11. CLI 通过配置文件选择引擎，暂时没有独立的引擎切换参数。
 12. 自定义托管区块 marker 缺少完整支持和测试。
 13. macOS 12、x64 和 arm64 正式成品尚未完成当前工作区实机验收。
@@ -657,7 +657,7 @@ rg -n 'Bearer |PRIVATE KEY|controllerSecret|subscriptionUrl|vless://' docs/dual-
 
 ### P0 发布收尾
 
-1. 增加跨进程同步锁和陈旧锁恢复。
+1. 将现有跨进程锁扩展到其余维护操作，并提供陈旧锁的受控恢复入口。
 2. 增加模式切换事务文件和应用启动恢复。
 3. 完成 External 后半段写入失败的原子提交或文件级回滚。
 4. 完成 macOS 12、x64、arm64 正式成品验收。
@@ -665,7 +665,7 @@ rg -n 'Bearer |PRIVATE KEY|controllerSecret|subscriptionUrl|vless://' docs/dual-
 
 ### P1 诊断与恢复
 
-1. 增加 SOCKS5 握手、UDP ASSOCIATE、UDP DNS、远端节点和 HTTP 分层诊断。
+1. 扩展 Mihomo 分层诊断到 External，并增加同一真实节点经 Surge 的对照验收。
 2. 将 Mihomo 当前 YAML、上一版 YAML 和切换事务纳入统一备份视图。
 3. 增加手动恢复 Mihomo 上一份 YAML 的受控入口。
 4. 明确清理日志、缓存和二进制的独立操作，避免扩大现有 `clean`。
@@ -753,3 +753,35 @@ npm run desktop:smoke
 本项目当前 Clash 导入仍只接收 VLESS，并经公共模型转换；参考项目的原生 Mihomo Provider 能力不能作为本项目已支持全部 Clash 字段或协议的依据。其自动更新文档中的测试结果也不能作为我们已完成的验收证据。
 
 参考项目根目录 [LICENSE](https://github.com/ssfun/surge-external-bridge/blob/225ad72ec28dfff17387939253f5d65afde85768/LICENSE) 声明 GPL-3.0-or-later，并附有名称与关联使用限制；本项目当前声明 MIT。后续应参考行为需求独立实现；若复制或改编其代码，须先核对相应许可证义务，致谢不能替代许可证合规。本轮增加来源链接和分析，未引入参考项目源码。
+
+## 21. 1.7.0 可靠性实现与验收
+
+### 21.1 订阅缓存
+
+`src/utils/subscription-cache.ts` 按订阅地址与请求头的 SHA-256 键保存最后成功解析的节点，文件位于 `outputDir/.subscription-cache/`。文件不保存完整订阅 URL 或请求头，但节点本身仍含凭据；目录权限 `0700`，文件权限 `0600`，临时文件原子替换。预览也会更新这份解析缓存，不写入 Surge 配置。
+
+失败来源回退缓存，概览显示提醒，订阅页显示最后成功时间、节点数和失败原因。有效 `proxies: []` 清空旧快照；主动删除来源后清除缓存，重新添加不会恢复已删除的旧快照。CLI 在下次收集时清理已移除来源。HTTP 空正文视为响应失败，不能当作有效空订阅。
+
+### 21.2 节点诊断
+
+概览页的“节点连通诊断”仅在 Mihomo 模式显示，针对已同步节点按需执行。TCP 默认测试 `https://www.gstatic.com/generate_204`，经过本机 SOCKS、节点出站、TLS 证书验证和 HTTP 响应；UDP 使用现有 `udpTestTarget`，通过 SOCKS5 UDP ASSOCIATE 查询 DNS 并校验响应标识、问题和来源。未开启 `udpRelay` 时显示未检测。
+
+两种测试并行，每种总超时为 8 秒，资源在成功、失败与超时后释放。结果包含时间、目标、耗时和失败阶段，不将本地端口可连接视作节点可用。失败可能与测试目标有关；测试不经过 Surge，不能证明 Surge 规则、真实服务器或所有业务均正常。
+
+### 21.3 Mihomo 更新与恢复
+
+`src/mihomo/update.ts` 为官方更新保留本轮旧二进制与原有回退槽，候选版本先与 Release 标签匹配，再用现有 YAML 执行 `mihomo -t`。原服务运行时，重启后核对 launchd 程序与参数、Controller 版本和监听端口所属 PID，验证通过才保存路径并显示完成。服务原本停止时保持停止，界面明确标注运行状态尚未验证。
+
+候选启动、运行校验或路径保存失败时恢复旧文件、旧配置路径和旧服务，再验证旧版本。恢复失败保留 `bin/.mihomo-update.lock/` 中的 `binary`、`previous-binary`，阻止再次更新；该目录也是异常退出后的恢复证据，不能直接删除。Homebrew 管理的二进制不由本项目回滚，失败会明确提示其限制。此功能不包含 Electron 应用自动更新。
+
+恢复前先确认同步和更新任务均已结束，并保留锁目录副本。托管安装的 `binary` 对应更新前的 `bin/mihomo`，`previous-binary` 对应更新前的 `bin/mihomo.previous`；按实际存在的备份恢复文件和原配置路径，再启动服务核对版本。缺少备份的首次安装不能当作存在旧版本。确认恢复后才移除更新锁目录并重试。
+
+桥接操作使用 `outputDir/.bridge-operation.lock/`，订阅收集使用 `outputDir/.subscription-operation.lock/`，锁内 `pid` 用于排查拥有者。正常结束自动清理；异常退出后先核对 PID 与实际任务，确认不存在正在运行的操作后再删除对应普通锁。不同输出目录不会共享这些普通锁，手工将多个配置指向同一运行服务仍需避免并发管理。
+
+### 21.4 验收范围
+
+本轮 162 项 Node 测试通过，包含缓存回退与恢复、有效空订阅、删除来源、权限与脱敏、互斥、TCP/UDP 模拟服务器、更新校验与回滚、服务归属和旧回退槽保留。构建与差异检查通过。
+
+Electron 使用隔离配置实际点击诊断，验证本地入口不可达的 TCP/UDP 错误反馈。`1180×780`、`720×680` 下检查长名称、结果换行与横向溢出，页面未捕获 JavaScript 错误。截图保留在本地临时目录用于验收，未替换仓库封面。
+
+尚未执行用户真实节点连通测试、真实 Mihomo LaunchAgent 升级回滚、macOS 12/Intel 实机验收。后续安装包仅由 GitHub Actions 构建发布，不能将本地源码测试等同于双架构安装包验证。

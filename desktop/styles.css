@@ -541,6 +541,17 @@ input.source-row-input:focus { border: 0; box-shadow: none; }
   .install-progress-stages { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 8px; }
 }
 
+.diagnostic-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.diagnostic-controls select { flex: 1 1 180px; min-width: 0; max-width: 100%; padding-right: 30px; text-overflow: ellipsis; }
+.diagnostic-result { overflow-wrap: anywhere; }
+.diagnostic-result > p { margin: 16px 0 8px; }
+.diagnostic-part { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 6px 12px; padding: 12px 0; border-top: 1px solid var(--line, #e4e4e7); }
+.diagnostic-part small { grid-column: 2; color: var(--muted, #6b7280); }
+.subscription-statuses { overflow-wrap: anywhere; font-size: 13px; }
+.subscription-statuses p { margin: 10px 0 0; }
+.subscription-statuses .status-warning { color: #936025; }
+.subscription-warning { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; color: #936025; font-size: 13px; margin-bottom: 16px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
   .button:active, .icon-button:active, .mini-button:active, .nav-item:active, .workflow-step:active, .engine-choice:active, .engine-switch-option:active { transform: none; }
