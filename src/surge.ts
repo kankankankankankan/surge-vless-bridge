@@ -210,9 +210,10 @@ export const collectVlessNodes = async (config: CliConfig) => {
           console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
         }
         return nodes;
-      } catch {
+      } catch (error) {
+        const detail = error instanceof Error ? `: ${error.message}` : '';
         console.warn(
-          `${describeSubscription(index)} (${describeSubscriptionSource(subscriptionUrl)}) failed and was skipped.`,
+          `${describeSubscription(index)} (${describeSubscriptionSource(subscriptionUrl)}) failed and was skipped${detail}.`,
         );
         return [];
       }

@@ -7,6 +7,14 @@
 
 ## 未发布
 
+## [1.6.2] - 2026-10-31
+
+### 修复
+
+- 订阅解析支持 Clash/Mihomo YAML 或 JSON 中的 VLESS 节点，并支持 Base64 编码的 Clash 配置。
+- 映射 Clash 的 TLS、Reality、WS、gRPC、HTTP Upgrade、SNI、跳过证书校验和指纹参数。
+- 订阅来源失败时在执行输出中保留脱敏后的具体解析原因。
+
 ## [1.6.1] - 2026-10-31
 
 ### 新增
