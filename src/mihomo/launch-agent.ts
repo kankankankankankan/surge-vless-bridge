@@ -133,7 +133,7 @@ export const waitForMihomoRuntime = async (config: CliConfig, version: string, t
 export const installMihomoLaunchAgent = async (config: CliConfig) => {
   const launchAgentPath = defaultMihomoLaunchAgentPath();
   const configPath = join(config.mihomo.dataDir, 'config.yaml');
-  await mkdir(join(config.mihomo.dataDir, 'logs'), { recursive: true });
+  await mkdir(join(config.mihomo.dataDir, 'logs'), { recursive: true, mode: 0o700 });
   await mkdir(dirname(launchAgentPath), { recursive: true });
   await writeTextFile(
     launchAgentPath,

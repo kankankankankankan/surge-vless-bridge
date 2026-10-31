@@ -155,17 +155,27 @@ test('returns nothing when the HTTP API is not configured', () => {
   assert.equal(parseHttpApiSettings('[Proxy]\nDIRECT = direct'), undefined);
 });
 
-test('doctor points at the HTTP API when it is not enabled', async () => {
+test('doctor reports missing auto-reload only when neither HTTP API nor Surge CLI exists', async t => {
+  t.mock.method(require('../dist/utils/surge-cli.js'), 'findSurgeCli', async () => undefined);
   const { config } = await makeConfig('doctor-api');
   const output = await captureConsole('log', () => runDoctor({ ...config, autoReload: true }));
 
-  assert.match(output, /WARN surge-http-api: not enabled/);
+  assert.match(output, /WARN auto-reload: Surge CLI unavailable/);
+});
+
+test('doctor recognizes the bundled Surge CLI without an HTTP API', async t => {
+  t.mock.method(require('../dist/utils/surge-cli.js'), 'findSurgeCli', async () => '/Applications/Surge.app/Contents/Applications/surge-cli');
+  const { config } = await makeConfig('doctor-bundled-cli');
+  const result = await runDoctor({ ...config, autoReload: true });
+  const check = result.checks.find(entry => entry.label === 'auto-reload');
+  assert.equal(check.level, 'ok');
+  assert.match(check.detail, /surge-cli available/);
 });
 
 test('doctor accepts a missing HTTP API when automatic reload is disabled', async () => {
   const { config } = await makeConfig('doctor-api-disabled');
   const result = await runDoctor({ ...config, autoReload: false });
-  const check = result.checks.find((entry) => entry.label === 'surge-http-api');
+  const check = result.checks.find((entry) => entry.label === 'auto-reload');
 
   assert.equal(check.level, 'ok');
   assert.match(check.detail, /disabled by config/);
@@ -178,5 +188,5 @@ test('doctor confirms the HTTP API when the profile enables it', async () => {
 
   const output = await captureConsole('log', () => runDoctor({ ...config, autoReload: true }));
 
-  assert.match(output, /OK surge-http-api: http:\/\/127\.0\.0\.1:6171/);
+  assert.match(output, /OK auto-reload: http:\/\/127\.0\.0\.1:6171/);
 });

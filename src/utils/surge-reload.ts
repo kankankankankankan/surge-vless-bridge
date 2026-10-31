@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { findSurgeCli } from './surge-cli';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +58,9 @@ const reloadViaHttpApi = async ({ key, origin }: HttpApiSettings) => {
 };
 
 const reloadViaCli = async () => {
-  await execFileAsync('surge-cli', ['reload'], { timeout: RELOAD_TIMEOUT_MS });
+  const binary = await findSurgeCli();
+  if (!binary) throw new Error('Surge CLI is unavailable.');
+  await execFileAsync(binary, ['reload'], { timeout: RELOAD_TIMEOUT_MS });
 };
 
 /**

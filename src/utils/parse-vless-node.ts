@@ -68,10 +68,11 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
       outbound.tls.insecure = true;
     }
 
-    if (fp) {
+    // Reality requires uTLS even when the subscription omits its fingerprint.
+    if (fp || security === 'reality') {
       outbound.tls.utls = {
         enabled: true,
-        fingerprint: fp,
+        fingerprint: fp || 'chrome',
       };
     }
 

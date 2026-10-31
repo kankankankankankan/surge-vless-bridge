@@ -5,6 +5,51 @@ const test = require('node:test');
 const { getVlessSubscriptionNodes, parseSubscriptionNodes } = require('../dist/parse.js');
 const { parseVlessNode } = require('../dist/utils/parse-vless-node.js');
 const { mapVlessToMihomoProxy } = require('../dist/mihomo/config.js');
+const { LEGACY_SUBSCRIPTION_USER_AGENT, subscriptionHeaders } = require('../dist/utils/subscription-headers.js');
+
+test('uses a supported Clash subscription identity for default and legacy browser requests', async t => {
+  const seen = [];
+  const server = createServer((request, response) => {
+    seen.push(request.headers['user-agent']);
+    if (request.headers['user-agent'] !== 'clash.meta') {
+      response.writeHead(403);
+      response.end('only supported proxy clients may fetch subscriptions');
+      return;
+    }
+    response.writeHead(200);
+    response.end('proxies: [{name: demo, type: vless, server: example.com, port: 443, uuid: demo}]');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const subscriptionUrl = `http://127.0.0.1:${server.address().port}/private-token`;
+  const before = await fetch(subscriptionUrl, { headers: { 'user-agent': LEGACY_SUBSCRIPTION_USER_AGENT } });
+  assert.equal(before.status, 403);
+  await before.text();
+  for (const requestHeaders of [undefined, { 'user-agent': LEGACY_SUBSCRIPTION_USER_AGENT }, { 'User-Agent': LEGACY_SUBSCRIPTION_USER_AGENT }]) {
+    assert.equal((await getVlessSubscriptionNodes({ subscriptionUrl, requestHeaders })).length, 1);
+  }
+  assert.deepEqual(seen.slice(1), ['clash.meta', 'clash.meta', 'clash.meta']);
+});
+
+test('preserves custom client and authentication headers without duplicate casing', () => {
+  const headers = subscriptionHeaders({ 'user-agent': 'clash.meta', 'User-Agent': 'CustomClient/1', Authorization: 'test-only', 'X-Custom': 'demo' });
+  assert.equal(headers['user-agent'], 'CustomClient/1');
+  assert.equal(headers.authorization, 'test-only');
+  assert.equal(headers['x-custom'], 'demo');
+  assert.equal(Object.keys(headers).filter(key => key.toLowerCase() === 'user-agent').length, 1);
+});
+
+test('keeps non-UA HTTP 403 failures visible without exposing the response or URL', async t => {
+  const server = createServer((_request, response) => { response.writeHead(403); response.end('secret-private-response'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  await assert.rejects(getVlessSubscriptionNodes({ subscriptionUrl: `http://127.0.0.1:${server.address().port}/secret-private-url` }), error => {
+    assert.match(error.message, /HTTP 403/);
+    assert.match(error.message, /IP 白名单/);
+    assert.doesNotMatch(error.message, /secret-private/);
+    return true;
+  });
+});
 
 const serve = async (body) => {
   const server = createServer((_request, response) => {
@@ -82,6 +127,55 @@ test('preserves JSON Reality, TLS, ALPN and encoded names through both backends'
   const mapped = mapVlessToMihomoProxy(outbound, outbound.tag, { udpRelay: true, tcpFastOpen: false });
   for (const key of ['name', 'server', 'port', 'uuid', 'tls', 'servername', 'skip-cert-verify', 'alpn', 'client-fingerprint', 'flow', 'packet-encoding', 'reality-opts']) {
     assert.deepEqual(mapped[key], proxy[key], key);
+  }
+});
+
+test('preserves unquoted Reality short IDs through YAML, JSON, Base64 and both backends', () => {
+  for (const literal of ['0012', '0000000000000000', '9999999999999999', '1e10', '12', 'abcd', '"0012"']) {
+    const expected = literal.replaceAll('"', '');
+    const yaml = `proxies: [{type: vless, server: example.com, port: 443, uuid: u, reality-opts: {public-key: PUBLIC, short-id: ${literal}}}]`;
+    const json = `{"proxies":[{"type":"vless","server":"example.com","port":443,"uuid":"u","reality-opts":{"public-key":"PUBLIC","short-id":${/^[1-9][0-9]*$/.test(literal) ? literal : JSON.stringify(expected)}}}]}`;
+    for (const body of [yaml, json, Buffer.from(yaml).toString('base64')]) {
+      const outbound = parseVlessNode(parseSubscriptionNodes(body)[0], 0);
+      assert.equal(outbound.tls.reality.short_id, expected);
+      assert.equal(mapVlessToMihomoProxy(outbound, 'demo', {})['reality-opts']['short-id'], expected);
+      assert.equal(outbound.server_port, 443);
+    }
+  }
+});
+
+test('preserves numeric Reality short IDs in scalar aliases and merged maps', () => {
+  const body = `
+sid: &sid 0012
+reality: &reality
+  public-key: PUBLIC
+  short-id: *sid
+proxies:
+  - type: vless
+    server: example.com
+    port: 443
+    uuid: u
+    reality-opts:
+      <<: *reality
+`;
+  assert.equal(parseVlessNode(parseSubscriptionNodes(body)[0], 0).tls.reality.short_id, '0012');
+  const anchored = `proxies:
+  - &node {type: vless, server: example.com, port: 443, uuid: u, reality-opts: {public-key: PUBLIC, short-id: &sid 0012}}
+  - <<: *node
+    name: second
+    reality-opts: {public-key: PUBLIC, short-id: *sid}
+`;
+  assert.deepEqual(parseSubscriptionNodes(anchored).map(link => parseVlessNode(link, 0).tls.reality.short_id), ['0012', '0012']);
+});
+
+test('rejects ambiguous numeric and non-text Reality short IDs without leaking content', () => {
+  for (const literal of ['true', 'null', '-12', '+12', '1.2', '0x12', '[12]', '{secret: value}']) {
+    const body = `proxies: [{type: vless, name: SECRET, server: example.com, port: 443, uuid: u, reality-opts: {public-key: PUBLIC, short-id: ${literal}}}]`;
+    assert.throws(() => parseSubscriptionNodes(body), error => {
+      assert.match(error.message, /short-id/);
+      assert.doesNotMatch(error.message, /SECRET|PUBLIC|example/);
+      return true;
+    });
   }
 });
 

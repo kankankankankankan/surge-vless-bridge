@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## [1.8.1] - 2026-10-31
+
+### Fixed
+
+- Keep custom interval hours beside the preset selector, including at the minimum window size.
+- Correct overview spacing and compact the workflow and toolbar in narrow windows; keep onboarding install controls visible.
+- Keep source saving accessible in a sticky footer and move notifications above it; improve form typography, help text contrast, keyboard focus and switch labels.
+- Distinguish successful, failed and untested diagnostics with color while retaining text labels.
+
+## [1.8.0] - 2026-10-31
+
+### Added
+
+- Persist stable node ports for both backends, migrate existing generated configurations, and avoid occupied ports for new nodes.
+- Enable or disable subscriptions, filter names by literal include/exclude text, preview cached match counts, and explicitly skip unsupported Clash nodes with a report.
+- Add searchable Mihomo batch diagnostics with select-all, progress, stop-after-current-node, and individual results.
+- Validate candidate Surge profiles with its bundled CLI before applying changes, explicitly reporting when native validation is unavailable.
+
+### Fixed
+
+- Default missing Reality fingerprints to Chrome while preserving explicit values.
+- Write files atomically, retain symlink targets and existing permissions, and create private files/directories with 0600/0700 modes.
+- Discover Surge's bundled CLI for reload and retain HTTP API/PATH fallbacks.
+- Skip unchanged Mihomo restarts after validating the running version, service ownership and listeners; repair unhealthy services.
+- Validate before stopping services for cleanup and correct synchronization rollback/reload ordering.
+- Reset the actual content scroller on navigation so a newly opened page starts at the top.
+
+## [1.7.2] - 2026-10-31
+
+### Fixed
+
+- Preserve the original YAML/JSON spelling of unquoted numeric Reality short IDs, including leading zeroes and long identifiers, with support for anchors, aliases and merged mappings.
+
+## [1.7.1] - 2026-10-31
+
+### Fixed
+
+- Request subscriptions with the supported `clash.meta` client identity instead of a browser User-Agent. Migrate the previously shipped browser default and preserve custom request headers with case-insensitive names.
+- Explain HTTP 403 access checks without hiding failures or exposing response bodies and private subscription URLs.
+
 ## [1.7.0] - 2026-10-31
 
 ### Added

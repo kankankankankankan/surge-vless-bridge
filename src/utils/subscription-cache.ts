@@ -11,6 +11,10 @@ export type SubscriptionStatus = {
   state: 'fresh' | 'cached' | 'failed';
   count: number;
   detail?: string;
+  sourceCount?: number;
+  filteredCount?: number;
+  skippedCount?: number;
+  skippedReasons?: string[];
 };
 type CacheEntry = SubscriptionStatus & { version: 1; nodes: string[] };
 const directory = (config: CliConfig) => join(config.outputDir, '.subscription-cache');

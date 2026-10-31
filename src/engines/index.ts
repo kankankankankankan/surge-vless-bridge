@@ -10,7 +10,8 @@ import { runMihomoDoctor } from '../mihomo/doctor';
 import { cleanMihomoArtifacts, rebuildMihomoSurge, syncMihomoToSurge } from '../mihomo/sync';
 
 export const syncBridge = (config: CliConfig, options?: { dryRun?: boolean }) =>
-  withBridgeOperation(config, () => config.runtimeMode === 'mihomo' ? syncMihomoToSurge(config, options) : syncSubscriptionToSurge(config, options));
+  withBridgeOperation<Awaited<ReturnType<typeof syncMihomoToSurge> | ReturnType<typeof syncSubscriptionToSurge>>>(config,
+    () => config.runtimeMode === 'mihomo' ? syncMihomoToSurge(config, options) : syncSubscriptionToSurge(config, options));
 
 export const rebuildBridge = (config: CliConfig) =>
   withBridgeOperation(config, () => config.runtimeMode === 'mihomo' ? rebuildMihomoSurge(config) : rebuildSurgeFromLocalConfigs(config));

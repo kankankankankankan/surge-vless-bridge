@@ -72,7 +72,9 @@ try {
   if (!profile.includes('udp-relay=true')) {
     throw new Error('Packaged scheduler did not preserve the UDP relay setting.');
   }
-  const node = JSON.parse(await readFile(join(root, 'nodes', 'sing-box[2081].json'), 'utf8')).outbounds[0];
+  const manifest = JSON.parse(await readFile(join(root, 'nodes', 'manifest.json'), 'utf8'));
+  if (manifest.files.length !== 1 || !/^sing-box\[\d+\]\.json$/.test(manifest.files[0])) throw new Error('Unexpected packaged node manifest.');
+  const node = JSON.parse(await readFile(join(root, 'nodes', manifest.files[0]), 'utf8')).outbounds[0];
   if (node.transport?.path !== '/smoke' || node.transport?.headers?.Host !== 'cdn.example.com') {
     throw new Error('Packaged subscription parser did not preserve the Clash WS options.');
   }

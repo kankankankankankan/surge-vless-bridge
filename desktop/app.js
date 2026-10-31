@@ -25,6 +25,7 @@ const labelMap = {
   'proxy-section': '代理区块',
   'rule-section': '规则区块',
   'surge-http-api': 'Surge 重载',
+  'auto-reload': 'Surge 重载',
   ports: '本地端口',
 };
 
@@ -55,12 +56,17 @@ let selectedHistoryId;
 let toastTimer;
 let previewPlan;
 let nextAction = 'preview';
-let sourceDraft = { subscriptionUrls: [], subscriptionNames: [], vlessNodes: [] };
+const defaultSourceOptions = () => ({ enabled: true, include: '', exclude: '', skipUnsupported: false });
+const copySourceOptions = (config) => config.subscriptionUrls.map((_, index) => ({ ...defaultSourceOptions(), ...config.subscriptionOptions?.[index] }));
+let sourceDraft = { subscriptionUrls: [], subscriptionNames: [], subscriptionOptions: [], vlessNodes: [] };
 let secretsVisible = false;
 let sourcesDirty = false;
 let singBoxUpdateChecked = false;
 let mihomoUpdateChecked = false;
-let diagnosticResult;
+const diagnosticResults = new Map();
+const diagnosticSelected = new Map();
+let diagnosticRunning = false;
+let diagnosticStopRequested = false;
 let engineDraftMode = 'external';
 let onboardingDraftMode;
 let engineOnboardingVisible = false;
@@ -68,7 +74,7 @@ let setupWizardOpen = false;
 let setupWizardInitialized = false;
 let setupWizardStep = 1;
 let setupWizardError = '';
-let wizardSourceDraft = { subscriptionUrls: [], subscriptionNames: [], vlessNodes: [] };
+let wizardSourceDraft = { subscriptionUrls: [], subscriptionNames: [], subscriptionOptions: [], vlessNodes: [] };
 const installProgressByTarget = new Map();
 let installIndicatorTimer;
 
@@ -249,7 +255,7 @@ const switchView = (view) => {
   $$('.view').forEach((item) => item.classList.toggle('active', item.id === `view-${view}`));
   $('#page-title').textContent = pageMeta[view][0];
   $('#page-subtitle').textContent = pageMeta[view][1];
-  window.scrollTo(0, 0);
+  $('.main-content').scrollTo({ top: 0, left: 0, behavior: 'instant' });
 };
 
 const checkByLabel = (label) => state.doctor.checks.find((check) => check.label === label);
@@ -283,11 +289,11 @@ const doctorAction = (check) => {
 
 const doctorDetail = (check) => {
   if (check.label === 'nodeSources') {
-    return `${state.config.subscriptionUrls.length} 个订阅，${state.config.vlessNodes.length} 个直接节点`;
+    const active = state.config.subscriptionUrls.filter((_, index) => state.config.subscriptionOptions?.[index]?.enabled !== false).length;
+    return `${active} 个启用订阅，${state.config.vlessNodes.length} 个直接节点`;
   }
-  if (check.label === 'surge-http-api') {
+  if (check.label === 'surge-http-api' || check.label === 'auto-reload') {
     if (!state.config.autoReload) return '已关闭同步后自动重载';
-    if (check.level === 'warn') return '未配置 Surge HTTP API，同步后需要手动重载配置';
   }
   if (['outputDir', 'backupDir', 'mihomo-data-dir'].includes(check.label) && check.level === 'warn') {
     return check.detail.replace(/ \(not created yet; run `sync`\)$/, '（尚未创建）');
@@ -305,18 +311,28 @@ const setWorkflowState = (name, status, detail) => {
 const renderDiagnostics = () => {
   const nodes = state.diagnosticNodes || [];
   $('#node-diagnostics').classList.toggle('hidden', state.config.runtimeMode !== 'mihomo');
-  const select = $('#diagnostic-node');
-  const previous = select.value;
-  select.innerHTML = nodes.map(node => `<option value="${node.port}">${escapeHtml(node.name)}</option>`).join('');
-  if (nodes.some(node => String(node.port) === previous)) select.value = previous;
+  for (const [port, name] of diagnosticSelected) if (!nodes.some(node => node.port === port && node.name === name)) diagnosticSelected.delete(port);
+  for (const [port, result] of diagnosticResults) if (!nodes.some(node => node.port === port && node.name === result.name)) diagnosticResults.delete(port);
   $('#diagnostic-empty').classList.toggle('hidden', nodes.length > 0);
-  $('#diagnose-node').disabled = busy || !state.runtimeModeConfirmed || nodes.length === 0;
-  select.disabled = busy || nodes.length === 0;
-  if (diagnosticResult && (state.config.runtimeMode !== 'mihomo' ||
-      !nodes.some(node => node.port === diagnosticResult.port && node.name === diagnosticResult.name))) {
-    diagnosticResult = undefined;
-    $('#diagnostic-result').textContent = '';
-  }
+  $('#diagnose-node').disabled = busy || !state.runtimeModeConfirmed || diagnosticSelected.size === 0;
+  $('#diagnose-node span').textContent = `检测所选${diagnosticSelected.size ? ` (${diagnosticSelected.size})` : ''}`;
+  $('#diagnostic-search').disabled = diagnosticRunning;
+  $('#diagnostic-select-all').disabled = busy || nodes.length === 0;
+  $('#diagnostic-clear').disabled = busy || diagnosticSelected.size === 0;
+  $('#diagnostic-stop').classList.toggle('hidden', !diagnosticRunning);
+  $('#diagnostic-stop').disabled = !diagnosticRunning || diagnosticStopRequested;
+  const query = $('#diagnostic-search').value.trim().toLocaleLowerCase();
+  const visible = nodes.filter(node => node.name.toLocaleLowerCase().includes(query));
+  const focusedPort = document.activeElement?.dataset.diagnosticPort;
+  const expanded = new Set($$('#diagnostic-list details[open]').map(details => details.closest('[data-diagnostic-row]').dataset.diagnosticRow));
+  const summary = (part, protocol) => part ? `${protocol} ${part.skipped ? '未检测' : part.success ? `通过 · ${part.latencyMs} ms` : '失败'}` : `${protocol} 未检测`;
+  const outcomeClass = part => !part || part.skipped ? '' : part.success ? 'status-success' : 'status-warning';
+  $('#diagnostic-list').innerHTML = visible.map(node => {
+    const result = diagnosticResults.get(node.port);
+    const detail = result?.error || (result ? `${formatDate(result.testedAt)}\nTCP: ${result.tcp.detail} · ${result.tcp.target}\nUDP: ${result.udp.detail} · ${result.udp.target}` : '');
+    return `<div class="diagnostic-node-row" data-diagnostic-row="${node.port}"><label><input type="checkbox" data-diagnostic-port="${node.port}" ${diagnosticSelected.has(node.port) ? 'checked' : ''} ${busy ? 'disabled' : ''} /><span>${escapeHtml(node.name)}</span></label><span class="diagnostic-outcome ${result?.error ? 'status-warning' : outcomeClass(result?.tcp)}">${escapeHtml(result?.error ? '检测失败' : summary(result?.tcp, 'TCP'))}</span><span class="diagnostic-outcome ${outcomeClass(result?.udp)}">${escapeHtml(summary(result?.udp, 'UDP'))}</span>${detail ? `<details ${expanded.has(String(node.port)) ? 'open' : ''}><summary>检测详情</summary><p>${escapeHtml(detail)}</p></details>` : ''}</div>`;
+  }).join('') || (nodes.length ? '<p class="form-meta">没有匹配的节点。</p>' : '');
+  if (focusedPort) $(`[data-diagnostic-port="${focusedPort}"]`)?.focus({ preventScroll: true });
 };
 
 const renderOverview = () => {
@@ -441,7 +457,7 @@ const renderOverview = () => {
     })
     .join('');
 
-  const staleSources = (state.subscriptionStatuses || []).filter(status => status && status.state !== 'fresh');
+  const staleSources = (state.subscriptionStatuses || []).filter((status, index) => status && status.state !== 'fresh' && state.config.subscriptionOptions?.[index]?.enabled !== false);
   $('#subscription-warning').classList.toggle('hidden', staleSources.length === 0);
   $('#subscription-warning-text').textContent = `${staleSources.length} 个订阅更新失败，请在订阅来源中查看缓存时间和原因。`;
 
@@ -455,6 +471,7 @@ const renderWizardSubscriptionList = () => {
   if (wizardSourceDraft.subscriptionUrls.length === 0) {
     wizardSourceDraft.subscriptionUrls.push('');
     wizardSourceDraft.subscriptionNames.push('');
+    wizardSourceDraft.subscriptionOptions.push(defaultSourceOptions());
   }
   $('#wizard-subscription-list').innerHTML = rows
     .map(
@@ -476,11 +493,12 @@ const syncWizardSourcesFromDom = () => {
 const wizardSourcesPayload = () => {
   syncWizardSourcesFromDom();
   const subscriptions = wizardSourceDraft.subscriptionUrls
-    .map((value, index) => ({ url: value.trim(), name: wizardSourceDraft.subscriptionNames[index]?.trim() ?? '' }))
+    .map((value, index) => ({ url: value.trim(), name: wizardSourceDraft.subscriptionNames[index]?.trim() ?? '', options: wizardSourceDraft.subscriptionOptions[index] ?? defaultSourceOptions() }))
     .filter((entry) => entry.url);
   return {
     subscriptionUrls: subscriptions.map((entry) => entry.url),
     subscriptionNames: subscriptions.map((entry) => entry.name),
+    subscriptionOptions: subscriptions.map((entry) => entry.options),
     vlessNodes: wizardSourceDraft.vlessNodes.map((value) => value.trim()).filter(Boolean),
   };
 };
@@ -505,6 +523,7 @@ const initializeSetupWizard = () => {
   wizardSourceDraft = {
     subscriptionUrls: [...state.config.subscriptionUrls],
     subscriptionNames: [...state.config.subscriptionNames],
+    subscriptionOptions: copySourceOptions(state.config),
     vlessNodes: [...state.config.vlessNodes],
   };
   renderWizardSubscriptionList();
@@ -643,7 +662,8 @@ const renderSourceList = (container, values, kind, names = []) => {
       const placeholder = kind === 'subscription' ? 'https://example.com/subscription' : 'vless://uuid@example.com:443?...';
       if (kind === 'subscription') {
         const fallbackName = sourceDescription(value, kind);
-        return `<div class="source-row subscription-source-row"><span class="source-row-icon"><i data-lucide="${icon}"></i></span><div class="source-fields"><label><span>自定义名称</span><input class="source-name-input" data-source-name data-source-index="${index}" type="text" value="${escapeHtml(names[index] || '')}" placeholder="${escapeHtml(fallbackName)}" spellcheck="false" /></label><label><span>订阅地址</span><input class="source-url-input${secretsVisible ? '' : ' masked'}" data-source-input="subscription" data-source-index="${index}" name="${inputName}" type="text" value="${escapeHtml(value)}" placeholder="${placeholder}" spellcheck="false" /></label></div><button type="button" class="icon-button source-remove" data-source-remove="${kind}" data-source-index="${index}" title="移除"><i data-lucide="x"></i></button></div>`;
+        const options = sourceDraft.subscriptionOptions[index] ?? defaultSourceOptions();
+        return `<div class="source-row subscription-source-row" data-subscription-row="${index}"><label class="source-enabled"><input type="checkbox" data-source-option="enabled" data-source-index="${index}" ${options.enabled ? 'checked' : ''} aria-label="启用订阅 ${index + 1}" /><span>启用</span></label><div class="source-fields"><label><span>自定义名称</span><input class="source-name-input" data-source-name data-source-index="${index}" type="text" value="${escapeHtml(names[index] || '')}" placeholder="${escapeHtml(fallbackName)}" spellcheck="false" /></label><label><span>订阅地址</span><input class="source-url-input${secretsVisible ? '' : ' masked'}" data-source-input="subscription" data-source-index="${index}" name="${inputName}" type="text" value="${escapeHtml(value)}" placeholder="${placeholder}" spellcheck="false" /></label><details class="source-filter-options" ${options.include || options.exclude || options.skipUnsupported ? 'open' : ''}><summary>筛选与兼容</summary><div class="source-filter-fields"><label><span>名称包含</span><input type="text" data-source-option="include" data-source-index="${index}" value="${escapeHtml(options.include)}" placeholder="例如：香港" /></label><label><span>名称排除</span><input type="text" data-source-option="exclude" data-source-index="${index}" value="${escapeHtml(options.exclude)}" placeholder="例如：实验" /></label></div><p class="form-meta">按文字匹配，不区分大小写；排除优先。</p><label class="source-skip"><input type="checkbox" data-source-option="skipUnsupported" data-source-index="${index}" ${options.skipUnsupported ? 'checked' : ''} /><span>跳过不支持的节点，并显示原因</span></label><p class="source-filter-preview form-meta" data-source-filter-preview="${index}" role="status">保存后预览更新，查看导入结果。</p></details></div><button type="button" class="icon-button source-remove" data-source-remove="${kind}" data-source-index="${index}" title="移除订阅"><i data-lucide="x"></i></button></div>`;
       }
       return `<div class="source-row"><span class="source-row-icon"><i data-lucide="${icon}"></i></span><label><span>${escapeHtml(sourceDescription(value, kind))}</span><input class="source-row-input${secretsVisible ? '' : ' masked'}" data-source-input="${kind}" data-source-index="${index}" name="${inputName}" type="text" value="${escapeHtml(value)}" placeholder="${placeholder}" spellcheck="false" /></label><button type="button" class="icon-button source-remove" data-source-remove="${kind}" data-source-index="${index}" title="移除"><i data-lucide="x"></i></button></div>`;
     })
@@ -662,15 +682,38 @@ const renderSources = () => {
   $('#subscription-statuses').innerHTML = (state.subscriptionStatuses || []).map((status, index) => {
     if (!status || sourcesDirty) return '';
     const name = state.config.subscriptionNames[index] || `订阅 ${index + 1}`;
+    if (state.config.subscriptionOptions?.[index]?.enabled === false) return `<p><strong>${escapeHtml(name)}</strong> 已停用，缓存已保留。</p>`;
     const description = status.state === 'cached'
       ? `更新失败，使用 ${formatDate(status.lastSuccessAt)} 的缓存（${status.count} 个节点）。${status.detail || ''}`
       : status.state === 'failed' ? `更新失败，无可用缓存。${status.detail || ''}`
       : `${status.count} 个节点 · 更新于 ${formatDate(status.lastSuccessAt)}`;
-    return `<p class="${status.state === 'fresh' ? '' : 'status-warning'}"><strong>${escapeHtml(name)}</strong> ${escapeHtml(description)}</p>`;
+    const filters = status.filteredCount ? ` · 筛除 ${status.filteredCount} 个` : '';
+    const skipped = status.skippedCount ? `<details class="status-warning"><summary>跳过 ${status.skippedCount} 个不支持的节点</summary><ul>${(status.skippedReasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul></details>` : '';
+    return `<p class="${status.state === 'fresh' ? '' : 'status-warning'}"><strong>${escapeHtml(name)}</strong> ${escapeHtml(description + filters)}</p>${skipped}`;
   }).join('');
   renderSourceList($('#subscription-list'), sourceDraft.subscriptionUrls, 'subscription', sourceDraft.subscriptionNames);
   renderSourceList($('#vless-node-list'), sourceDraft.vlessNodes, 'vless');
   renderSourceMeta();
+  sourceDraft.subscriptionUrls.forEach((_, index) => void previewSourceFilters(index));
+};
+
+const sourceFilterRequests = new Map();
+const previewSourceFilters = async (index) => {
+  const output = $(`[data-source-filter-preview="${index}"]`);
+  if (!output) return;
+  const options = sourceDraft.subscriptionOptions[index] ?? defaultSourceOptions();
+  const request = {};
+  sourceFilterRequests.set(index, request);
+  if (!options.enabled) { output.textContent = '已停用，保存后不参与同步，保留上次成功缓存。'; return; }
+  try {
+    const result = await api.previewSourceFilters({ subscriptionUrl: sourceDraft.subscriptionUrls[index]?.trim() ?? '', options });
+    if (!output.isConnected || sourceFilterRequests.get(index) !== request) return;
+    output.textContent = result.available && result.skipped && !options.skipUnsupported
+      ? '上次缓存跳过了不支持的节点；当前为严格模式，请预览更新重新获取。'
+      : result.available
+      ? `按上次成功内容：匹配 ${result.matched} / ${result.total} 个节点${result.skipped ? `，跳过 ${result.skipped} 个不兼容节点` : ''}。保存后预览更新以确认。`
+      : '暂无可用缓存，保存后预览更新，查看导入结果。';
+  } catch { if (output.isConnected && sourceFilterRequests.get(index) === request) output.textContent = '暂时无法预估，保存后预览更新。'; }
 };
 
 const scheduleText = (schedule) => {
@@ -1082,6 +1125,7 @@ const loadState = async (showCover = true) => {
     sourceDraft = {
       subscriptionUrls: [...state.config.subscriptionUrls],
       subscriptionNames: [...state.config.subscriptionNames],
+      subscriptionOptions: copySourceOptions(state.config),
       vlessNodes: [...state.config.vlessNodes],
     };
     sourcesDirty = false;
@@ -1372,6 +1416,11 @@ const runWorkflowAction = (action) => {
 };
 
 const syncSourceDraftFromDom = () => {
+  $$('[data-source-option]').forEach((input) => {
+    const index = Number(input.dataset.sourceIndex);
+    sourceDraft.subscriptionOptions[index] ??= defaultSourceOptions();
+    sourceDraft.subscriptionOptions[index][input.dataset.sourceOption] = input.type === 'checkbox' ? input.checked : input.value;
+  });
   $$('[data-source-input="subscription"]').forEach((input) => {
     sourceDraft.subscriptionUrls[Number(input.dataset.sourceIndex)] = input.value;
   });
@@ -1388,6 +1437,7 @@ const addSourceRow = (kind) => {
   const values = kind === 'subscription' ? sourceDraft.subscriptionUrls : sourceDraft.vlessNodes;
   values.push('');
   if (kind === 'subscription') sourceDraft.subscriptionNames.push('');
+  if (kind === 'subscription') sourceDraft.subscriptionOptions.push(defaultSourceOptions());
   sourcesDirty = true;
   renderSources();
   window.lucide?.createIcons();
@@ -1399,6 +1449,7 @@ const removeSourceRow = (kind, index) => {
   const values = kind === 'subscription' ? sourceDraft.subscriptionUrls : sourceDraft.vlessNodes;
   values.splice(index, 1);
   if (kind === 'subscription') sourceDraft.subscriptionNames.splice(index, 1);
+  if (kind === 'subscription') sourceDraft.subscriptionOptions.splice(index, 1);
   sourcesDirty = true;
   renderSources();
   window.lucide?.createIcons();
@@ -1439,11 +1490,15 @@ $('#sources-form').addEventListener('submit', async (event) => {
         .map((value, index) => ({ value: value.trim(), name: sourceDraft.subscriptionNames[index]?.trim() ?? '' }))
         .filter((entry) => entry.value)
         .map((entry) => entry.name),
+      subscriptionOptions: sourceDraft.subscriptionUrls
+        .map((value, index) => ({ value: value.trim(), options: sourceDraft.subscriptionOptions[index] ?? defaultSourceOptions() }))
+        .filter((entry) => entry.value).map((entry) => entry.options),
       vlessNodes: sourceDraft.vlessNodes.map((value) => value.trim()).filter(Boolean),
     });
     sourceDraft = {
       subscriptionUrls: [...state.config.subscriptionUrls],
       subscriptionNames: [...state.config.subscriptionNames],
+      subscriptionOptions: copySourceOptions(state.config),
       vlessNodes: [...state.config.vlessNodes],
     };
     sourcesDirty = false;
@@ -1562,32 +1617,56 @@ $('#install-sing-box-direct').addEventListener('click', () => installSingBox('di
 $('#install-sing-box-brew').addEventListener('click', () => installSingBox('homebrew'));
 $('#check-sing-box-update').addEventListener('click', () => refreshSingBoxStatus(true));
 $('#rollback-sing-box').addEventListener('click', rollbackSingBox);
-$('#diagnostic-node').addEventListener('change', () => {
-  diagnosticResult = undefined;
-  $('#diagnostic-result').textContent = '';
+$('#diagnostic-search').addEventListener('input', renderDiagnostics);
+$('#diagnostic-select-all').addEventListener('click', () => {
+  if (busy) return;
+  const query = $('#diagnostic-search').value.trim().toLocaleLowerCase();
+  (state.diagnosticNodes || []).filter(node => node.name.toLocaleLowerCase().includes(query)).forEach(node => diagnosticSelected.set(node.port, node.name));
+  renderDiagnostics();
+});
+$('#diagnostic-clear').addEventListener('click', () => { if (!busy) { diagnosticSelected.clear(); renderDiagnostics(); } });
+$('#diagnostic-list').addEventListener('change', (event) => {
+  const input = event.target.closest('[data-diagnostic-port]');
+  if (!input || busy) return;
+  const port = Number(input.dataset.diagnosticPort);
+  const node = state.diagnosticNodes.find(node => node.port === port);
+  if (input.checked && node) diagnosticSelected.set(port, node.name); else diagnosticSelected.delete(port);
+  renderDiagnostics();
+});
+$('#diagnostic-stop').addEventListener('click', () => {
+  diagnosticStopRequested = true;
+  $('#diagnostic-progress').textContent = '当前节点检测结束后停止。';
+  renderDiagnostics();
 });
 $('#diagnose-node').addEventListener('click', async () => {
   if (busy) return;
-  const port = Number($('#diagnostic-node').value);
-  const node = state.diagnosticNodes?.find(node => node.port === port);
-  if (!node) return;
-  setBusy(true, '正在检测节点', false);
-  $('#diagnostic-result').textContent = '正在检测 TCP 与 UDP…';
+  const nodes = (state.diagnosticNodes || []).filter(node => diagnosticSelected.has(node.port));
+  if (!nodes.length) return;
+  diagnosticRunning = true;
+  diagnosticStopRequested = false;
+  let completed = 0;
+  let tcpPassed = 0;
+  setBusy(true, '正在批量检测节点', false);
   renderDiagnostics();
   try {
-    const result = await api.diagnoseNode({ port, name: node.name });
-    diagnosticResult = { ...result, port, name: node.name };
-    $('#diagnostic-result').innerHTML = `<p><strong>${escapeHtml(node.name)}</strong> · ${escapeHtml(formatDate(result.testedAt))}</p>` +
-      ['tcp', 'udp'].map(protocol => {
-        const part = result[protocol];
-        const status = part.skipped ? '未检测' : part.success ? '通过' : '失败';
-        return `<div class="diagnostic-part"><strong>${protocol.toUpperCase()} ${status}</strong><span>${escapeHtml(part.detail)}</span><small>${escapeHtml(part.target)} · ${part.latencyMs} ms</small></div>`;
-      }).join('');
-  } catch (error) {
-    $('#diagnostic-result').textContent = error.message || '检测失败，请刷新后重试。';
+    for (const node of nodes) {
+      if (diagnosticStopRequested) break;
+      $('#diagnostic-progress').textContent = `正在检测 ${completed + 1} / ${nodes.length}：${node.name}`;
+      try {
+        const result = await api.diagnoseNode({ port: node.port, name: node.name });
+        diagnosticResults.set(node.port, { ...result, name: node.name });
+        if (result.tcp.success) tcpPassed++;
+      } catch (error) {
+        diagnosticResults.set(node.port, { name: node.name, error: error.message || '检测失败，请刷新后重试。' });
+      }
+      completed++;
+      renderDiagnostics();
+    }
   } finally {
+    diagnosticRunning = false;
     setBusy(false);
     renderDiagnostics();
+    $('#diagnostic-progress').textContent = `${diagnosticStopRequested ? '已停止' : '检测完成'} · ${completed} / ${nodes.length} 个 · TCP 通过 ${tcpPassed} 个`;
   }
 });
 
@@ -1861,6 +1940,7 @@ $('#wizard-add-subscription').addEventListener('click', () => {
   syncWizardSourcesFromDom();
   wizardSourceDraft.subscriptionUrls.push('');
   wizardSourceDraft.subscriptionNames.push('');
+  wizardSourceDraft.subscriptionOptions.push(defaultSourceOptions());
   renderWizardSubscriptionList();
   window.lucide?.createIcons();
   $$('[data-wizard-source-url]').at(-1)?.focus();
@@ -1937,6 +2017,7 @@ document.addEventListener('click', async (event) => {
     const index = Number(wizardSourceRemove.dataset.wizardSourceRemove);
     wizardSourceDraft.subscriptionUrls.splice(index, 1);
     wizardSourceDraft.subscriptionNames.splice(index, 1);
+    wizardSourceDraft.subscriptionOptions.splice(index, 1);
     renderWizardSubscriptionList();
     window.lucide?.createIcons();
   }
@@ -1976,6 +2057,16 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('input', (event) => {
+  const optionInput = event.target.closest('[data-source-option]');
+  if (optionInput) {
+    const index = Number(optionInput.dataset.sourceIndex);
+    sourceDraft.subscriptionOptions[index] ??= defaultSourceOptions();
+    sourceDraft.subscriptionOptions[index][optionInput.dataset.sourceOption] = optionInput.type === 'checkbox' ? optionInput.checked : optionInput.value;
+    sourcesDirty = true;
+    renderSourceMeta();
+    void previewSourceFilters(index);
+    return;
+  }
   const nameInput = event.target.closest('[data-source-name]');
   if (nameInput) {
     sourceDraft.subscriptionNames[Number(nameInput.dataset.sourceIndex)] = nameInput.value;
@@ -1990,6 +2081,7 @@ document.addEventListener('input', (event) => {
   sourcesDirty = true;
   if (input.dataset.sourceInput === 'subscription') {
     input.closest('.source-row').querySelector('[data-source-name]').placeholder = sourceDescription(input.value, 'subscription');
+    void previewSourceFilters(Number(input.dataset.sourceIndex));
   } else {
     input.closest('.source-row').querySelector('label > span').textContent = sourceDescription(input.value, 'vless');
   }
@@ -2008,6 +2100,7 @@ document.addEventListener('paste', (event) => {
   values.splice(Number(input.dataset.sourceIndex), 1, ...lines);
   if (input.dataset.sourceInput === 'subscription') {
     sourceDraft.subscriptionNames.splice(Number(input.dataset.sourceIndex), 1, ...lines.map(() => ''));
+    sourceDraft.subscriptionOptions.splice(Number(input.dataset.sourceIndex), 1, ...lines.map(defaultSourceOptions));
   }
   sourcesDirty = true;
   renderSources();

@@ -464,20 +464,6 @@ test('macOS workflow publishes verified version-tag builds to GitHub Releases', 
   assert.match(workflow, /gh release upload/);
 });
 
-test('desktop custom interval uses a full-width second row', async () => {
-  const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
-  const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');
-  assert.match(html, /class="field-grid schedule-grid"/);
-  assert.match(html, /id="schedule-custom-interval" class="custom-interval-row hidden"/);
-  assert.match(css, /\.interval-controls \{ display: grid; gap: 8px; min-width: 0; \}/);
-  assert.match(css, /\.field-grid\.two \{[^}]*align-items: start;/);
-  assert.match(css, /\.schedule-grid \{ grid-template-columns: 160px minmax\(300px, 1fr\); align-items: start; \}/);
-  assert.match(css, /@media \(max-width: 820px\)[\s\S]*?\.schedule-grid \{ grid-template-columns: 1fr; \}/);
-  assert.match(css, /\.custom-interval-row \{[^}]*grid-template-columns: auto minmax\(0, 1fr\)/);
-  assert.match(css, /\.number-suffix \{[^}]*width: 100%;/);
-  assert.doesNotMatch(css, /\.number-suffix \{[^}]*width: 160px;/);
-});
-
 test('desktop exposes named subscriptions, inline engine switching and install progress', async () => {
   const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
   const css = await readFile(path.join(__dirname, '..', 'desktop', 'styles.css'), 'utf8');

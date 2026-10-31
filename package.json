@@ -1,6 +1,6 @@
 {
   "name": "surge-vless-bridge",
-  "version": "1.7.0",
+  "version": "1.8.1",
   "description": "Surge Mac VLESS support with selectable sing-box External and Mihomo gateway runtimes.",
   "license": "MIT",
   "author": "chen86860",
@@ -44,6 +44,7 @@
     "desktop:dmg": "npm run build:desktop && electron-builder --mac dmg",
     "desktop:smoke": "node scripts/smoke-packaged-scheduler.mjs",
     "desktop:verify": "node scripts/verify-packaged-gui.mjs",
+    "desktop:ui-smoke": "electron scripts/smoke-desktop-controls.cjs",
     "init": "tsx src/cli.ts init",
     "sync": "tsx src/cli.ts sync",
     "rebuild": "tsx src/cli.ts rebuild",

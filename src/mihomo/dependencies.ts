@@ -169,7 +169,7 @@ export const installOfficialMihomo = async (
   const digest = createHash('sha256').update(bytes).digest('hex');
   if (digest !== asset.digest!.slice('sha256:'.length)) throw new Error('Mihomo 发布包 SHA-256 校验失败。');
 
-  await mkdir(installDir, { recursive: true });
+  await mkdir(installDir, { recursive: true, mode: 0o700 });
   const targetPath = join(installDir, 'mihomo');
   const nextPath = `${targetPath}.next`;
   const previousPath = `${targetPath}.previous`;

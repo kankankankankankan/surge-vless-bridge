@@ -1,4 +1,4 @@
-import type { AddressResolverStrategy, PolicyGroupTargetMode, RuntimeMode } from '../types/cli-config';
+import type { AddressResolverStrategy, PolicyGroupTargetMode, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
 import type { SingBoxVersionStatus } from './dependencies';
 import type { MihomoVersionStatus } from '../mihomo/dependencies';
 import type { MihomoServiceStatus } from '../mihomo/launch-agent';
@@ -59,6 +59,7 @@ export type DesktopConfigView = {
   runtimeMode: RuntimeMode;
   subscriptionUrls: string[];
   subscriptionNames: string[];
+  subscriptionOptions: SubscriptionOptions[];
   vlessNodes: string[];
   surgeConfigPath: string;
   singBoxBinary: string;
@@ -182,7 +183,8 @@ export type DesktopApi = {
   getState: () => Promise<DesktopState>;
   diagnoseNode: (input: { port: number; name: string }) => ReturnType<typeof diagnoseMihomoNode>;
   inspectPolicyGroups: (input: { surgeConfigPath: string; policyGroupName: string }) => Promise<PolicyGroupView[]>;
-  saveSources: (input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) => Promise<DesktopState>;
+  saveSources: (input: { subscriptionUrls: string[]; subscriptionNames?: string[]; subscriptionOptions?: SubscriptionOptions[]; vlessNodes: string[] }) => Promise<DesktopState>;
+  previewSourceFilters: (input: { subscriptionUrl: string; options: SubscriptionOptions }) => Promise<{ available: boolean; total: number; matched: number; skipped: number }>;
   saveSettings: (input: DesktopConfigView) => Promise<DesktopState>;
   runAction: (action: DesktopAction) => Promise<ActionResult>;
   repairCheck: (check: RepairableCheck) => Promise<ActionResult>;

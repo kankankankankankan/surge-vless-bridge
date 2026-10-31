@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { access, chmod, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, readdir, stat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -12,18 +12,11 @@ import type {
   RuntimeMode,
 } from './types/cli-config';
 import { pathExists, readJsonFile, writeTextFile } from './utils/fs';
+import { DEFAULT_SUBSCRIPTION_HEADERS as DEFAULT_HEADERS, subscriptionHeaders } from './utils/subscription-headers';
+import { normalizeSubscriptionOptions, subscriptionOptionsForUrl } from './utils/subscription-options';
 
 export const CONFIG_FILE_NAME = '.surge-vless-bridge.json';
 export const HOME_CONFIG_FILE_PATH = join('.config', 'surge-vless-bridge', 'config.json');
-
-const DEFAULT_HEADERS = {
-  accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-  'accept-language': 'en,zh-CN;q=0.9,zh;q=0.8',
-  'upgrade-insecure-requests': '1',
-  'user-agent':
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-} as const;
 
 const DEFAULT_ADDRESS_RESOLVER: AddressResolverConfig = {
   strategy: 'doh',
@@ -139,6 +132,7 @@ export const getDefaultConfig = async (_cwd: string): Promise<CliConfig> => {
     subscriptionUrl: '',
     subscriptionUrls: [],
     subscriptionNames: [],
+    subscriptionOptions: [],
     vlessNodes: [],
     surgeConfigPath: await detectSurgeConfigPath(),
     singBoxBinary: singBoxBinary.path,
@@ -197,15 +191,8 @@ const resolveDefaultConfigPath = (cwd: string) => {
 };
 
 const writePrivateJsonAtomically = async (path: string, value: unknown) => {
-  const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  await mkdir(dirname(path), { recursive: true });
-  try {
-    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await rename(temporaryPath, path);
-    await chmod(path, 0o600);
-  } finally {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-  }
+  await writeTextFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  await chmod(path, 0o600);
 };
 
 export const persistMihomoControllerSecret = async ({
@@ -252,6 +239,7 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
         ?.map((url, index) => ({
           url: typeof url === 'string' ? url.trim() : '',
           name: typeof inputSubscriptionNames[index] === 'string' ? inputSubscriptionNames[index]!.trim() : '',
+          options: normalizeSubscriptionOptions(sanitizedInput.subscriptionOptions?.[index] ?? subscriptionOptionsForUrl(base, typeof url === 'string' ? url : '')),
         }))
         .filter((entry) => entry.url !== '')
     : undefined;
@@ -344,6 +332,8 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
     subscriptionNames:
       normalizedSubscriptions?.map((entry) => entry.name) ??
       (base.subscriptionUrls ?? []).map((_, index) => base.subscriptionNames?.[index]?.trim() ?? ''),
+    subscriptionOptions: normalizedSubscriptions?.map(entry => entry.options) ??
+      (base.subscriptionUrls ?? []).map((_, index) => normalizeSubscriptionOptions(sanitizedInput.subscriptionOptions?.[index] ?? base.subscriptionOptions?.[index])),
     vlessNodes: normalizedVlessNodes ?? base.vlessNodes,
     policyGroupName,
     policyGroupTargets,
@@ -354,10 +344,10 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
       Number.isFinite(connectTimeoutSeconds) && connectTimeoutSeconds > 0
         ? connectTimeoutSeconds
         : base.connectTimeoutSeconds,
-    requestHeaders: {
+    requestHeaders: subscriptionHeaders({
       ...base.requestHeaders,
       ...(sanitizedInput.requestHeaders ?? {}),
-    },
+    }),
     addressResolver: {
       ...base.addressResolver,
       ...(addressResolverInput ?? {}),

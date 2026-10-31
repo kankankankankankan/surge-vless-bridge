@@ -1,10 +1,11 @@
 import { writeTextFile } from './utils/fs';
-import { parseClashVlessNodes } from './utils/parse-clash-vless';
+import { parseClashVlessNodes, type SubscriptionParseOptions } from './utils/parse-clash-vless';
 import { SubscriptionError } from './utils/subscription-error';
+import { subscriptionHeaders } from './utils/subscription-headers';
 
 const SUBSCRIPTION_TIMEOUT_MS = 15_000;
 
-export const parseSubscriptionNodes = (raw: string): string[] => {
+export const parseSubscriptionNodes = (raw: string, options: SubscriptionParseOptions = {}): string[] => {
   let text = raw.trim();
   if (!text) throw new SubscriptionError('订阅响应为空。');
   const compact = text.replace(/\s+/g, '');
@@ -21,7 +22,7 @@ export const parseSubscriptionNodes = (raw: string): string[] => {
   if (entries.length && entries.every((line) => /^(?:ss|ssr|vless|vmess|trojan|hysteria2?|hy2|tuic):\/\//i.test(line))) {
     return [...new Set(entries.filter((line) => /^vless:\/\//i.test(line)))];
   }
-  return [...new Set(parseClashVlessNodes(text))];
+  return [...new Set(parseClashVlessNodes(text, options))];
 };
 
 // Subscription URLs carry a token, in the query string or in the path itself, so failures name the
@@ -40,28 +41,31 @@ export const getVlessSubscriptionNodes = async ({
   subscriptionUrl,
   requestHeaders,
   subscriptionOutputPath,
+  parseOptions,
 }: {
   subscriptionUrl: string;
   requestHeaders?: Record<string, string>;
   subscriptionOutputPath?: string;
+  parseOptions?: SubscriptionParseOptions;
 }) => {
   const source = describeSubscriptionUrl(subscriptionUrl);
 
   let rawData: string;
   try {
     const response = await fetch(subscriptionUrl, {
-      headers: requestHeaders,
+      headers: subscriptionHeaders(requestHeaders),
       // Without a deadline an unresponsive provider hangs `sync` indefinitely.
       signal: AbortSignal.timeout(SUBSCRIPTION_TIMEOUT_MS),
     });
-    if (!response.ok) throw new SubscriptionError(`订阅请求失败（HTTP ${response.status}）。`);
+    if (!response.ok) throw new SubscriptionError(`订阅请求失败（HTTP ${response.status}）。${response.status === 403
+      ? '服务端拒绝访问，请检查订阅权限、客户端 UA 限制、IP 白名单或反向代理规则。' : ''}`);
     rawData = await response.text();
   } catch (error) {
     if (error instanceof SubscriptionError) throw error;
     const timeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
     throw new SubscriptionError(timeout ? `订阅 ${source} 请求超时（15 秒）。` : `订阅 ${source} 下载失败，请检查网络、DNS 或 TLS 连接。`);
   }
-  const vlessNodes = parseSubscriptionNodes(rawData);
+  const vlessNodes = parseSubscriptionNodes(rawData, parseOptions);
   if (subscriptionOutputPath) {
     await writeTextFile(subscriptionOutputPath, `${vlessNodes.join('\n')}\n`);
   }

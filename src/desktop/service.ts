@@ -16,7 +16,7 @@ import {
   restoreSurgeProfileBackup,
 } from '../surge';
 import { cleanBridge, doctorBridge, rebuildBridge, syncBridge } from '../engines';
-import type { CliConfig, CliConfigInput, RuntimeMode } from '../types/cli-config';
+import type { CliConfig, CliConfigInput, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
 import { assertRuntimeModeConfirmed } from '../runtime-mode';
 import { pathExists, readJsonFile, readTextFile, writeTextFile } from '../utils/fs';
 import {
@@ -40,7 +40,8 @@ import {
 } from '../mihomo/launch-agent';
 import { readMihomoNodes } from '../mihomo/sync';
 import { diagnoseMihomoNode } from '../mihomo/probe';
-import { pruneSubscriptionCache, readSubscriptionStatuses } from '../utils/subscription-cache';
+import { pruneSubscriptionCache, readSubscriptionCache, readSubscriptionStatuses } from '../utils/subscription-cache';
+import { filterSubscriptionNodes, normalizeSubscriptionOptions, subscriptionOptionsForUrl } from '../utils/subscription-options';
 import { withBridgeOperation, withDirectoryLock } from '../utils/operation-lock';
 import type { InstallProgressEvent, InstallProgressReporter } from '../install-progress';
 import { LAUNCH_AGENT_LABEL, LaunchAgentScheduler } from './scheduler';
@@ -195,12 +196,14 @@ export class DesktopService {
     await this.dependencies.stopMihomoService({ uninstall: true });
   }
 
-  async saveSources(input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) {
+  async saveSources(input: { subscriptionUrls: string[]; subscriptionNames?: string[]; subscriptionOptions?: SubscriptionOptions[]; vlessNodes: string[] }) {
+    const loaded = await this.loadConfig();
     const seenSubscriptions = new Set<string>();
     const subscriptions = input.subscriptionUrls
       .map((value, index) => ({
         url: value.trim(),
         name: input.subscriptionNames?.[index]?.trim() ?? '',
+        options: normalizeSubscriptionOptions(input.subscriptionOptions?.[index] ?? subscriptionOptionsForUrl(loaded.config, value)),
       }))
       .filter((entry) => {
         if (!entry.url || seenSubscriptions.has(entry.url)) return false;
@@ -209,14 +212,27 @@ export class DesktopService {
       });
     const subscriptionUrls = subscriptions.map((entry) => entry.url);
     const subscriptionNames = subscriptions.map((entry) => entry.name);
+    const subscriptionOptions = subscriptions.map(entry => entry.options);
     const vlessNodes = uniqueLines(input.vlessNodes);
     validateSources(subscriptionUrls, vlessNodes);
-    const loaded = await this.loadConfig();
     await withDirectoryLock(join(loaded.config.outputDir, '.subscription-operation.lock'), async () => {
-      await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, subscriptionNames, vlessNodes });
+      await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, subscriptionNames, subscriptionOptions, vlessNodes });
       await pruneSubscriptionCache(loaded.config, subscriptionUrls);
     });
     return this.getState();
+  }
+
+  async previewSourceFilters(input: { subscriptionUrl: string; options: SubscriptionOptions }) {
+    const { config } = await this.loadConfig();
+    const cache = await readSubscriptionCache(config, input.subscriptionUrl.trim());
+    if (!cache?.lastSuccessAt) return { available: false, total: 0, matched: 0, skipped: 0 };
+    const options = normalizeSubscriptionOptions(input.options);
+    return {
+      available: true,
+      total: cache.sourceCount ?? cache.nodes.length,
+      matched: !options.skipUnsupported && cache.skippedCount ? 0 : filterSubscriptionNodes(cache.nodes, options).length,
+      skipped: cache.skippedCount ?? 0,
+    };
   }
 
   async saveSettings(input: DesktopConfigView) {
@@ -467,6 +483,10 @@ export class DesktopService {
             (_, index) => loaded.config.subscriptionNames?.[index]?.trim() ?? '',
           ),
         ],
+        subscriptionOptions: [
+          ...(loaded.config.subscriptionUrl ? [subscriptionOptionsForUrl(loaded.config, loaded.config.subscriptionUrl)] : []),
+          ...(loaded.config.subscriptionUrls ?? []).map((_, index) => normalizeSubscriptionOptions(loaded.config.subscriptionOptions?.[index])),
+        ],
         vlessNodes: loaded.config.vlessNodes ?? [],
         surgeConfigPath: loaded.config.surgeConfigPath,
         singBoxBinary: loaded.config.singBoxBinary,
@@ -555,7 +575,7 @@ export class DesktopService {
             : check === 'mihomo-data-dir'
               ? loaded.config.mihomo.dataDir
               : loaded.config.backupDir;
-        await mkdir(path, { recursive: true });
+        await mkdir(path, { recursive: true, mode: 0o700 });
         message =
           check === 'outputDir'
             ? '节点目录已创建。'

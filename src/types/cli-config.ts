@@ -2,6 +2,13 @@ export type AddressResolverStrategy = 'system' | 'doh' | 'dns' | 'off';
 export type PolicyGroupTargetMode = 'auto' | 'merge' | 'reference';
 export type RuntimeMode = 'external' | 'mihomo';
 
+export type SubscriptionOptions = {
+  enabled: boolean;
+  include: string;
+  exclude: string;
+  skipUnsupported: boolean;
+};
+
 export type MihomoConfig = {
   binary: string;
   dataDir: string;
@@ -26,6 +33,7 @@ export type CliConfig = {
   subscriptionUrl?: string;
   subscriptionUrls?: string[];
   subscriptionNames?: string[];
+  subscriptionOptions?: SubscriptionOptions[];
   vlessNodes?: string[];
   surgeConfigPath: string;
   singBoxBinary: string;

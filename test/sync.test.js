@@ -351,7 +351,11 @@ test('gives duplicate node names a numeric suffix', async () => {
 
   await syncSubscriptionToSurge(config);
 
-  assert.equal(await policyGroupLine(config), 'VLESS = url-test, HK 01, HK 01 2, HK 01 3, no-alert=0, hidden=0');
+  const line = await policyGroupLine(config);
+  assert.deepEqual(line.replace('VLESS = url-test, ', '').replace(', no-alert=0, hidden=0', '').split(', ').sort(), ['HK 01', 'HK 01 2', 'HK 01 3']);
+  config.subscriptionUrls = [subscriptionUrl([vlessLink(3, 'HK 01'), vlessLink(1, 'HK 01'), vlessLink(2, 'HK 01')])];
+  await syncSubscriptionToSurge(config);
+  assert.equal(await policyGroupLine(config), line);
 });
 
 test('warns about an empty subscription but still syncs the others', async () => {

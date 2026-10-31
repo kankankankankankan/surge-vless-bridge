@@ -8,6 +8,7 @@ const api: DesktopApi = {
   diagnoseNode: (input) => ipcRenderer.invoke('desktop:diagnose-node', input),
   inspectPolicyGroups: (input) => ipcRenderer.invoke('desktop:inspect-policy-groups', input),
   saveSources: (input) => ipcRenderer.invoke('desktop:save-sources', input),
+  previewSourceFilters: (input) => ipcRenderer.invoke('desktop:preview-source-filters', input),
   saveSettings: (input) => ipcRenderer.invoke('desktop:save-settings', input),
   runAction: (action) => ipcRenderer.invoke('desktop:run-action', action),
   repairCheck: (check) => ipcRenderer.invoke('desktop:repair-check', check),

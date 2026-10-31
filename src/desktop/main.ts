@@ -94,10 +94,11 @@ const registerIpc = () => {
   );
   ipcMain.handle(
     'desktop:save-sources',
-    (_event, input: { subscriptionUrls: string[]; subscriptionNames?: string[]; vlessNodes: string[] }) =>
+    (_event, input: Parameters<DesktopService['saveSources']>[0]) =>
       service.saveSources(input),
   );
   ipcMain.handle('desktop:save-settings', (_event, input: DesktopConfigView) => service.saveSettings(input));
+  ipcMain.handle('desktop:preview-source-filters', (_event, input: Parameters<DesktopService['previewSourceFilters']>[0]) => service.previewSourceFilters(input));
   ipcMain.handle('desktop:run-action', (_event, action: DesktopAction) => service.runAction(action));
   ipcMain.handle('desktop:repair-check', (_event, check: RepairableCheck) => service.repairCheck(check));
   ipcMain.handle('desktop:install-sing-box', (_event, method: SingBoxInstallMethod) => service.installSingBox(method));

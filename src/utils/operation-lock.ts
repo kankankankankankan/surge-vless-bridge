@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import type { CliConfig } from '../types/cli-config';
 
 export const withDirectoryLock = async <T>(path: string, run: () => Promise<T>): Promise<T> => {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   try { await mkdir(path, { mode: 0o700 }); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     // Identify crashed owners without displacing live or incomplete locks.

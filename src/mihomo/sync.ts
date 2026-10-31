@@ -12,16 +12,21 @@ import {
   cleanManagedArtifacts,
   collectVlessNodes,
   ensureRequiredConfig,
-  ensureUniquePolicyName,
+  prepareManagedCleanup,
+  parseSyncVlessNodes,
   reloadSurgeIfEnabled,
-  sanitizePolicyName,
+  stablePolicyNames,
 } from '../surge';
 import type { CliConfig } from '../types/cli-config';
 import { pathExists, readTextFile, writeTextFile } from '../utils/fs';
 import { stopManagedSingBoxProcesses } from '../utils/managed-processes';
 import { parseVlessNode } from '../utils/parse-vless-node';
+import { planStablePorts, stableNodeIdentity, stableNodeVariant, stablePortFile, type PortEntry, type PortIdentity } from '../utils/stable-ports';
+import { parseClashVlessNodes } from '../utils/parse-clash-vless';
+import { validateSurgeProfile } from '../utils/surge-cli';
 import { buildMihomoSurgeProxyLine, mapVlessToMihomoProxy, renderMihomoConfig, type MihomoNode } from './config';
-import { getMihomoServiceStatus, installMihomoLaunchAgent, stopMihomoLaunchAgent } from './launch-agent';
+import { defaultMihomoLaunchAgentPath, getMihomoServiceStatus, installMihomoLaunchAgent, renderMihomoLaunchAgentPlist, stopMihomoLaunchAgent, waitForMihomoRuntime } from './launch-agent';
+import { readMihomoVersion } from './dependencies';
 
 const execFileAsync = promisify(execFile);
 const CONFIG_FILE_NAME = 'config.yaml';
@@ -38,15 +43,40 @@ const validateUdpTarget = (config: CliConfig) => {
 const collectOutbounds = async (config: CliConfig) => {
   ensureRequiredConfig(config);
   const links = await collectVlessNodes(config);
-  return { links, outbounds: links.map((node, index) => parseVlessNode(node, index)) };
+  return { links, ...parseSyncVlessNodes(links) };
 };
 
 const buildNodes = async (config: CliConfig) => {
-  const { links, outbounds } = await collectOutbounds(config);
-  const seen = new Map<string, number>();
+  const { links, outbounds, unnamed } = await collectOutbounds(config);
+  const previous: PortEntry[] = [];
+  const previousNames: PortIdentity[] = [];
+  const configPath = join(config.mihomo.dataDir, CONFIG_FILE_NAME);
+  if (await pathExists(configPath)) {
+    const old = parse(await readTextFile(configPath)) as { proxies?: Array<{ name: string; server: string; port: number; uuid: string }>; listeners?: Array<{ proxy: string; port: number }> };
+    for (const listener of old.listeners ?? []) {
+      const proxy = old.proxies?.find(entry => entry.name === listener.proxy);
+      if (proxy?.uuid && proxy.server && Number.isInteger(listener.port)) {
+        let variant: string | undefined;
+        try {
+          const [link] = parseClashVlessNodes(JSON.stringify({ proxies: [proxy] }));
+          if (link) variant = stableNodeVariant(parseVlessNode(link, 0));
+        } catch {
+          // Unknown legacy options must not attach a different transport to an existing identity.
+        }
+        const identity = { name: proxy.name, server: proxy.server, serverPort: proxy.port, uuid: proxy.uuid, variant };
+        previous.push({ id: stableNodeIdentity(identity), port: listener.port });
+        previousNames.push(identity);
+      }
+    }
+  }
+  const names = stablePolicyNames(outbounds, previousNames, unnamed);
+  const allocation = await planStablePorts({
+    filePath: stablePortFile(config.outputDir, 'mihomo'), portStart: config.portStart, previous,
+    identities: outbounds.map((node, index) => stableNodeIdentity({ name: names[index]!, server: node.server, serverPort: node.server_port, uuid: node.uuid })),
+  });
   const nodes: MihomoNode[] = outbounds.map((outbound, index) => {
-    const name = ensureUniquePolicyName(sanitizePolicyName(outbound.tag, index), seen);
-    const port = config.portStart + index;
+    const name = names[index]!;
+    const port = allocation.ports[index]!;
     return {
       name,
       port,
@@ -54,7 +84,8 @@ const buildNodes = async (config: CliConfig) => {
       proxy: mapVlessToMihomoProxy(outbound, name, config),
     };
   });
-  return { links, nodes };
+  nodes.sort((left, right) => left.port - right.port);
+  return { links, nodes, commitPorts: allocation.commit };
 };
 
 const validateMihomoConfig = async (binary: string, candidatePath: string) => {
@@ -94,6 +125,20 @@ const waitForController = async (config: CliConfig) => {
     await new Promise((resolve) => setTimeout(resolve, 250));
   } while (Date.now() < deadline);
   throw new Error('Mihomo started but its local controller did not become ready.');
+};
+
+const syncOperations = {
+  status: getMihomoServiceStatus,
+  start: installMihomoLaunchAgent,
+  stop: stopMihomoLaunchAgent,
+  wait: waitForController,
+  verify: waitForMihomoRuntime,
+  readVersion: readMihomoVersion,
+  definitionMatches: async (config: CliConfig) => {
+    const expected = renderMihomoLaunchAgentPlist({ binary: config.mihomo.binary, dataDir: config.mihomo.dataDir,
+      configPath: join(config.mihomo.dataDir, CONFIG_FILE_NAME), autoStart: config.mihomo.autoStart });
+    return (await readTextFile(defaultMihomoLaunchAgentPath()).catch(() => '')) === expected;
+  },
 };
 
 const previewFromNodes = async (config: CliConfig, nodes: MihomoNode[]) => {
@@ -143,21 +188,33 @@ export const readMihomoNodes = async (config: CliConfig): Promise<Array<{ name: 
   });
 };
 
-export const syncMihomoToSurge = async (config: CliConfig, { dryRun = false }: { dryRun?: boolean } = {}) => {
+export const syncMihomoToSurge = async (config: CliConfig, { dryRun = false, operations: overrides = {} }: {
+  dryRun?: boolean; operations?: Partial<typeof syncOperations>;
+} = {}) => {
+  const operations = { ...syncOperations, ...overrides };
   if (!config.surgeConfigPath || !(await pathExists(config.surgeConfigPath))) {
     throw new Error(`Surge profile not found: ${config.surgeConfigPath || 'missing'}`);
   }
   validateUdpTarget(config);
-  await mkdir(config.mihomo.dataDir, { recursive: true });
-  await mkdir(config.backupDir, { recursive: true });
-  const { links, nodes } = await buildNodes(config);
+  await mkdir(config.mihomo.dataDir, { recursive: true, mode: 0o700 });
+  await mkdir(config.backupDir, { recursive: true, mode: 0o700 });
+  const { links, nodes, commitPorts } = await buildNodes(config);
   const candidatePath = join(config.mihomo.dataDir, `.candidate-${randomUUID()}.yaml`);
-  await writeTextFile(candidatePath, renderMihomoConfig({ nodes, config }));
+  const nextConfig = renderMihomoConfig({ nodes, config });
+  await writeTextFile(candidatePath, nextConfig);
   await chmod(candidatePath, 0o600);
 
   try {
     await validateMihomoConfig(config.mihomo.binary, candidatePath);
     const preview = await previewFromNodes(config, nodes);
+    const profile = await buildSurgeProfile({
+      config,
+      proxyLines: nodes.map((node) => buildMihomoSurgeProxyLine({ name: node.name, port: node.port, config })),
+      nodeNames: nodes.map((node) => node.name),
+    });
+    const surgeValidation = await validateSurgeProfile(profile.updated, config.surgeConfigPath);
+    preview.validationSummary = surgeValidation.checked ? 'Mihomo 与 Surge 配置已通过校验'
+      : `Mihomo 配置已通过校验；${surgeValidation.warning}`;
     if (dryRun) {
       console.log(`Would write ${nodes.length} nodes through Mihomo.`);
       return { dryRun: true as const, backupPath: undefined, count: nodes.length, preview };
@@ -167,36 +224,62 @@ export const syncMihomoToSurge = async (config: CliConfig, { dryRun = false }: {
     const previousPath = join(config.mihomo.dataDir, PREVIOUS_CONFIG_FILE_NAME);
     const hadConfig = await pathExists(configPath);
     const previousSurge = await readFile(config.surgeConfigPath);
+    const running = await operations.status(config);
+    if (running.loaded && !running.serviceMatchesConfig) throw new Error('Mihomo 服务与当前配置不匹配，已停止同步。');
+    if (running.controllerReady && (!running.loaded || !running.pid)) throw new Error('Controller 由未确认归属的进程提供服务，已停止同步。');
+    const sameConfig = hadConfig && await readTextFile(configPath) === nextConfig;
+    if (sameConfig && running.controllerReady && running.serviceMatchesConfig && await operations.definitionMatches(config)) {
+      let healthy = false;
+      try {
+        await operations.verify(config, await operations.readVersion(config.mihomo.binary), 1_500);
+        healthy = true;
+      } catch { /* A stale or unhealthy managed service must be repaired even when its files match. */ }
+      if (healthy) {
+        const profileChanged = profile.updated !== previousSurge.toString('utf8');
+        const backupPath = profileChanged ? await backupSurgeProfile(config) : undefined;
+        try {
+          if (profileChanged) await writeTextFile(config.surgeConfigPath, profile.updated);
+          if (config.subscriptionOutputPath) {
+            const value = `${links.join('\n')}\n`;
+            if (await readTextFile(config.subscriptionOutputPath).catch(() => '') !== value) await writeTextFile(config.subscriptionOutputPath, value);
+          }
+          await commitPorts();
+        } catch (error) {
+          if (profileChanged) await writeTextFile(config.surgeConfigPath, previousSurge.toString('utf8'));
+          throw error;
+        }
+        if (profileChanged) await reloadSurgeIfEnabled(config, profile.updated);
+        console.log('Mihomo 配置未变化，运行状态已验证，已跳过重启。');
+        return { dryRun: false as const, backupPath, count: nodes.length, unchanged: !profileChanged };
+      }
+    }
     const backupPath = await backupSurgeProfile(config);
-    const profile = await buildSurgeProfile({
-      config,
-      proxyLines: nodes.map((node) => buildMihomoSurgeProxyLine({ name: node.name, port: node.port, config })),
-      nodeNames: nodes.map((node) => node.name),
-    });
 
     try {
       if (hadConfig) await copyFile(configPath, previousPath);
-      const running = await getMihomoServiceStatus(config);
       if (!running.controllerReady) {
+        if (running.loaded && running.pid) await operations.stop({});
         await stopManagedSingBoxProcesses({ singBoxBinary: config.singBoxBinary, outputDir: config.outputDir });
         await validatePorts(nodes);
       }
       await rename(candidatePath, configPath);
       await chmod(configPath, 0o600);
-      await installMihomoLaunchAgent(config);
-      await waitForController(config);
+      await operations.start(config);
+      await operations.wait(config);
+      await operations.verify(config, await operations.readVersion(config.mihomo.binary));
       await writeTextFile(config.surgeConfigPath, profile.updated);
-      await reloadSurgeIfEnabled(config, profile.updated);
       if (config.subscriptionOutputPath) await writeTextFile(config.subscriptionOutputPath, `${links.join('\n')}\n`);
+      await commitPorts();
+      await reloadSurgeIfEnabled(config, profile.updated);
       return { dryRun: false as const, backupPath, count: nodes.length };
     } catch (error) {
       await writeTextFile(config.surgeConfigPath, previousSurge.toString('utf8'));
-      if (await pathExists(previousPath)) {
+      if (hadConfig && await pathExists(previousPath)) {
         await copyFile(previousPath, configPath);
-        await installMihomoLaunchAgent(config).catch(() => undefined);
+        await operations.start(config).catch(() => undefined);
       } else {
         await rm(configPath, { force: true });
-        await stopMihomoLaunchAgent({ uninstall: true }).catch(() => undefined);
+        await operations.stop({ uninstall: true }).catch(() => undefined);
       }
       throw error;
     }
@@ -213,6 +296,7 @@ export const rebuildMihomoSurge = async (config: CliConfig) => {
     proxyLines: nodes.map((node) => buildMihomoSurgeProxyLine({ name: node.name, port: node.port, config })),
     nodeNames: nodes.map((node) => node.name),
   });
+  await validateSurgeProfile(profile.updated, config.surgeConfigPath);
   const backupPath = await backupSurgeProfile(config);
   await writeTextFile(config.surgeConfigPath, profile.updated);
   await reloadSurgeIfEnabled(config, profile.updated);
@@ -223,8 +307,9 @@ export const cleanMihomoArtifacts = async (
   config: CliConfig,
   { stopService = stopMihomoLaunchAgent }: { stopService?: typeof stopMihomoLaunchAgent } = {},
 ) => {
+  const profile = await prepareManagedCleanup(config);
   await stopService({ uninstall: true });
-  const result = await cleanManagedArtifacts(config);
+  const result = await cleanManagedArtifacts(config, profile);
   const generatedConfigs = (await readdir(config.mihomo.dataDir).catch(() => [])).filter(
     (entry) =>
       entry === CONFIG_FILE_NAME ||

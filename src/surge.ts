@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { getVlessSubscriptionNodes } from './parse';
 import { SubscriptionError } from './utils/subscription-error';
 import { pruneSubscriptionCache, readSubscriptionCache, writeSubscriptionCache } from './utils/subscription-cache';
+import { filterSubscriptionNodes, subscriptionOptionsForUrl } from './utils/subscription-options';
 import { withDirectoryLock } from './utils/operation-lock';
 import type { AddressResolverConfig, CliConfig, PolicyGroupTargetMode } from './types/cli-config';
 import type { SingBoxVlessOutbound } from './types/sing-box-vless-outbound';
@@ -18,6 +19,8 @@ import { pathExists, readJsonFile, readTextFile, writeBinaryFile, writeTextFile 
 import { parseVlessNode } from './utils/parse-vless-node';
 import { stopManagedSingBoxProcesses } from './utils/managed-processes';
 import { parseHttpApiSettings, reloadSurgeProfile } from './utils/surge-reload';
+import { planStablePorts, stableNodeIdentity, stableNodeVariant, stablePortFile, type PortEntry, type PortIdentity } from './utils/stable-ports';
+import { findSurgeCli, validateSurgeProfile } from './utils/surge-cli';
 
 const POLICY_REGEX_FILTER = /^((?!Remain|Expired|官网|如需|套餐|去除|剩余|距离|Reset|重置|流量).)+$/;
 const MANAGED_CONFIG_PATTERN = /^sing-box\[\d+\]\.json$/;
@@ -197,38 +200,56 @@ export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(c
   const describeSubscription = (index: number) => `Subscription ${index + 1} of ${subscriptionUrls.length}`;
   const vlessNodesBySubscription = await Promise.all(
     subscriptionUrls.map(async (subscriptionUrl, index) => {
+      const options = subscriptionOptionsForUrl(config, subscriptionUrl);
+      if (!options.enabled) return [];
       const previous = await readSubscriptionCache(config, subscriptionUrl);
       const checkedAt = new Date().toISOString();
+      const skippedReasons: string[] = [];
       let nodes: string[];
       try {
         nodes = await getVlessSubscriptionNodes({
           subscriptionUrl,
           requestHeaders: config.requestHeaders,
+          parseOptions: { skipUnsupported: options.skipUnsupported, onSkipped: reason => skippedReasons.push(reason) },
         });
         nodes.forEach((node, nodeIndex) => parseVlessNode(node, nodeIndex));
       } catch (error) {
         const detail = error instanceof SubscriptionError ? error.message : '订阅读取失败。';
         failures[index] = `订阅 ${index + 1}：${detail}`;
-        const cached = previous?.lastSuccessAt ? previous.nodes : [];
+        // A partial snapshot cannot satisfy a later strict import request.
+        const usableCache = Boolean(previous?.lastSuccessAt && (options.skipUnsupported || !previous.skippedCount));
+        const cached = usableCache ? previous!.nodes : [];
+        const selected = filterSubscriptionNodes(cached, options);
         await writeSubscriptionCache(config, subscriptionUrl, {
-          version: 1, nodes: cached, count: cached.length, checkedAt,
+          version: 1, nodes: previous?.nodes ?? [], count: selected.length, checkedAt,
           lastSuccessAt: previous?.lastSuccessAt,
-          state: previous?.lastSuccessAt ? 'cached' : 'failed', detail,
+          sourceCount: previous?.sourceCount ?? cached.length,
+          filteredCount: cached.length - selected.length,
+          skippedCount: previous?.skippedCount,
+          skippedReasons: previous?.skippedReasons,
+          state: usableCache ? 'cached' : 'failed', detail,
         });
-        console.warn(`${describeSubscription(index)}: ${detail}${previous?.lastSuccessAt
-          ? ` 使用 ${previous.lastSuccessAt} 的缓存（${cached.length} 个节点）。`
+        console.warn(`${describeSubscription(index)}: ${detail}${usableCache
+          ? ` 使用 ${previous!.lastSuccessAt} 的缓存（${selected.length} 个节点）。`
           : ' 无可用缓存，已跳过。'}`);
-        return cached;
+        return selected;
       }
+      const selected = filterSubscriptionNodes(nodes, options);
       // A valid empty document replaces the old snapshot; only failures use cached nodes.
       await writeSubscriptionCache(config, subscriptionUrl, {
-        version: 1, nodes, count: nodes.length, checkedAt, lastSuccessAt: checkedAt, state: 'fresh',
+        version: 1, nodes, count: selected.length, checkedAt, lastSuccessAt: checkedAt, state: 'fresh',
+        sourceCount: nodes.length + skippedReasons.length,
+        filteredCount: nodes.length - selected.length,
+        skippedCount: skippedReasons.length,
+        skippedReasons,
       });
+      if (skippedReasons.length) console.warn(`${describeSubscription(index)}: 已跳过 ${skippedReasons.length} 个不兼容节点。\n${skippedReasons.join('\n')}`);
       if (nodes.length === 0) {
         failures[index] = `订阅 ${index + 1}：已识别订阅，但没有 VLESS 节点。`;
         console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
       }
-      return nodes;
+      if (nodes.length && !selected.length) failures[index] = `订阅 ${index + 1}：筛选后没有匹配节点。`;
+      return selected;
     }),
   );
 
@@ -362,8 +383,8 @@ const ensureRuntimePaths = async (config: CliConfig) => {
 };
 
 export const ensureWritableDirs = async (config: CliConfig) => {
-  await mkdir(config.outputDir, { recursive: true });
-  await mkdir(config.backupDir, { recursive: true });
+  await mkdir(config.outputDir, { recursive: true, mode: 0o700 });
+  await mkdir(config.backupDir, { recursive: true, mode: 0o700 });
 };
 
 // `sing-box check` validates structure only: it rejects malformed JSON, unknown outbound types and
@@ -440,7 +461,7 @@ const pruneBackups = async (backupDir: string, keep: number) => {
 };
 
 export const backupSurgeProfile = async (config: CliConfig) => {
-  await mkdir(config.backupDir, { recursive: true });
+  await mkdir(config.backupDir, { recursive: true, mode: 0o700 });
 
   const bytes = await readJsonCompatibleBinary(config.surgeConfigPath);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1049,19 +1070,37 @@ const maybeReloadSurge = async (config: CliConfig, surgeText: string) => {
 
 const generateConfigsFromOutbounds = async ({
   outbounds,
+  unnamed,
   config,
   stagingDir,
 }: {
   outbounds: SingBoxVlessOutbound[];
+  unnamed: boolean[];
   config: CliConfig;
   stagingDir: string;
 }) => {
-  const seenNodeNames = new Map<string, number>();
+  const previous: PortEntry[] = [];
+  const previousNames: PortIdentity[] = [];
+  for (const file of await readManagedConfigEntries(config.outputDir)) {
+    const json = await readJsonFile<{ outbounds?: SingBoxVlessOutbound[] }>(join(config.outputDir, file));
+    const node = json.outbounds?.[0];
+    const port = Number(file.match(/\[(\d+)\]/)?.[1]);
+    if (node?.tag && node.server && node.uuid && Number.isInteger(port)) {
+      const identity = { name: node.tag, server: node.server, serverPort: node.server_port, uuid: node.uuid, variant: stableNodeVariant(node) };
+      previous.push({ id: stableNodeIdentity(identity), port });
+      previousNames.push(identity);
+    }
+  }
+  const names = stablePolicyNames(outbounds, previousNames, unnamed);
+  const allocation = await planStablePorts({
+    filePath: stablePortFile(config.outputDir, 'external'), portStart: config.portStart, previous,
+    identities: outbounds.map((node, index) => stableNodeIdentity({ name: names[index]!, server: node.server, serverPort: node.server_port, uuid: node.uuid })),
+  });
 
   const generated = await Promise.all(
     outbounds.map(async (outbound, index) => {
-      const port = config.portStart + index;
-      const nodeName = ensureUniquePolicyName(sanitizePolicyName(outbound.tag, index), seenNodeNames);
+      const port = allocation.ports[index]!;
+      const nodeName = names[index]!;
       const fileName = `sing-box[${port}].json`;
       const stagedConfigPath = join(stagingDir, fileName);
       const serverConfig = parseTemplate({
@@ -1085,6 +1124,7 @@ const generateConfigsFromOutbounds = async ({
       } satisfies StagedGeneratedNode;
     }),
   );
+  generated.sort((left, right) => left.port - right.port);
 
   await mapWithConcurrency(generated, SING_BOX_CHECK_CONCURRENCY, (entry) =>
     validateSingBoxConfig(config.singBoxBinary, entry.stagedConfigPath),
@@ -1107,7 +1147,48 @@ const generateConfigsFromOutbounds = async ({
     generated,
     proxyLines,
     nodeNames: generated.map((entry) => entry.nodeName),
+    commitPorts: allocation.commit,
   };
+};
+
+export const parseSyncVlessNodes = (links: string[]) => {
+  const unnamed = links.map(link => !decodeURIComponent(new URL(link).hash.replace(/^#/, '')).trim());
+  const outbounds = links.map((link, index) => {
+    const node = parseVlessNode(link, index);
+    if (unnamed[index]) node.tag = `vless-${stableNodeVariant(node).slice(0, 12)}`;
+    return node;
+  });
+  return { outbounds, unnamed };
+};
+
+export const stablePolicyNames = (outbounds: SingBoxVlessOutbound[], previous: PortIdentity[] = [], unnamed: boolean[] = []) => {
+  const used = new Set<string>();
+  const names: string[] = new Array(outbounds.length);
+  const entries = outbounds.map((node, index) => ({ node, index, name: sanitizePolicyName(node.tag, index), variant: stableNodeVariant(node) }));
+  entries.sort((left, right) => left.name.localeCompare(right.name)
+    || stableNodeIdentity({ name: left.name, server: left.node.server, serverPort: left.node.server_port, uuid: left.node.uuid })
+      .localeCompare(stableNodeIdentity({ name: right.name, server: right.node.server, serverPort: right.node.server_port, uuid: right.node.uuid }))
+    || left.variant.localeCompare(right.variant));
+  for (const entry of entries) {
+    const candidates = previous.filter(node => node.server === entry.node.server && node.serverPort === entry.node.server_port
+      && node.uuid === entry.node.uuid
+      && (node.name === entry.name || new RegExp(`^${escapeRegExp(entry.name)} [0-9]+$`).test(node.name)
+        || (unnamed[entry.index] && /^vless-(?:[0-9]+|[a-f0-9]{12})(?: [0-9]+)?$/.test(node.name))));
+    const siblings = entries.filter(other => other.node.server === entry.node.server && other.node.server_port === entry.node.server_port
+      && other.node.uuid === entry.node.uuid && (other.name === entry.name || (unnamed[other.index] && unnamed[entry.index])));
+    const old = candidates.find(node => !used.has(node.name) && node.variant === entry.variant)
+      ?? (siblings.length === 1 && candidates.length === 1 && !used.has(candidates[0]!.name) ? candidates[0] : undefined);
+    if (old) { names[entry.index] = old.name; used.add(old.name); }
+  }
+  for (const entry of entries) {
+    if (names[entry.index]) continue;
+    let name = entry.name;
+    let suffix = 2;
+    while (used.has(name)) name = `${entry.name} ${suffix++}`;
+    names[entry.index] = name;
+    used.add(name);
+  }
+  return names;
 };
 
 const reportDryRun = async ({
@@ -1122,6 +1203,7 @@ const reportDryRun = async ({
     proxyLines: generated.proxyLines,
     nodeNames: generated.nodeNames,
   });
+  const surgeValidation = await validateSurgeProfile(updated, config.surgeConfigPath);
 
   console.log(`Would write ${generated.nodeNames.length} nodes:`);
   for (const entry of generated.generated) {
@@ -1157,6 +1239,7 @@ const reportDryRun = async ({
     added,
     removed,
     profileChanged: updated !== source,
+    validationSummary: surgeValidation.checked ? 'sing-box 与 Surge 配置已通过校验' : `sing-box 配置已通过校验；${surgeValidation.warning}`,
     policyGroupName: config.policyGroupName,
     policyGroupTargets,
     policyGroupExclusions,
@@ -1178,12 +1261,11 @@ const reportDryRun = async ({
   };
 };
 
-export const cleanManagedArtifacts = async (config: CliConfig) => {
+export const prepareManagedCleanup = async (config: CliConfig) => {
   if (!config.surgeConfigPath || !(await pathExists(config.surgeConfigPath))) {
     throw new Error(`Surge profile not found: ${config.surgeConfigPath || 'missing'}`);
   }
 
-  const backupPath = await backupSurgeProfile(config);
   const source = await readTextFile(config.surgeConfigPath);
 
   // Drops the managed block and the generated policy group, leaving the rest of the profile as is.
@@ -1203,12 +1285,20 @@ export const cleanManagedArtifacts = async (config: CliConfig) => {
   });
 
   const withoutMihomoRule = updateMihomoProcessRule({ surgeText: withoutTargets, enabled: false });
+  await validateSurgeProfile(withoutMihomoRule, config.surgeConfigPath);
+  return withoutMihomoRule;
+};
+
+export const cleanManagedArtifacts = async (config: CliConfig, preparedProfile?: string) => {
+  const withoutMihomoRule = preparedProfile ?? await prepareManagedCleanup(config);
+  const backupPath = await backupSurgeProfile(config);
   await writeTextFile(config.surgeConfigPath, withoutMihomoRule);
 
   const entries = (await readdir(config.outputDir).catch(() => [])).filter(
     (entry) => MANAGED_CONFIG_PATTERN.test(entry) || entry === MANIFEST_FILE_NAME,
   );
   await Promise.all(entries.map((entry) => rm(join(config.outputDir, entry), { force: true })));
+  await Promise.all(['external', 'mihomo'].map(mode => rm(stablePortFile(config.outputDir, mode as 'external' | 'mihomo'), { force: true })));
 
   await maybeReloadSurge(config, withoutMihomoRule);
 
@@ -1225,19 +1315,15 @@ export const syncSubscriptionToSurge = async (config: CliConfig, { dryRun = fals
 
   const vlessNodes = await collectVlessNodes(config);
 
-  if (config.subscriptionOutputPath && !dryRun) {
-    await writeTextFile(config.subscriptionOutputPath, `${vlessNodes.join('\n')}\n`);
-  }
-
-  const outbounds = vlessNodes.map((node, index) => parseVlessNode(node, index));
+  const { outbounds, unnamed } = parseSyncVlessNodes(vlessNodes);
 
   // Everything is generated and validated in a staging directory first, so a failure part-way through
   // leaves both the Surge profile and the previous node configs untouched.
   const stagingDir = join(config.outputDir, `.staging-${randomUUID()}`);
-  await mkdir(stagingDir, { recursive: true });
+  await mkdir(stagingDir, { recursive: true, mode: 0o700 });
 
   try {
-    const generated = await generateConfigsFromOutbounds({ outbounds, config, stagingDir });
+    const generated = await generateConfigsFromOutbounds({ outbounds, unnamed, config, stagingDir });
 
     // The staging directory already holds validated configs, so a dry run can report exactly what a
     // real sync would produce without having written anything outside it.
@@ -1251,6 +1337,7 @@ export const syncSubscriptionToSurge = async (config: CliConfig, { dryRun = fals
       proxyLines: generated.proxyLines,
       nodeNames: generated.nodeNames,
     });
+    await validateSurgeProfile(surgeProfile.updated, config.surgeConfigPath);
 
     const backupPath = await backupSurgeProfile(config);
 
@@ -1262,6 +1349,8 @@ export const syncSubscriptionToSurge = async (config: CliConfig, { dryRun = fals
       console.log(`Removed ${removedCount} node config${removedCount === 1 ? '' : 's'} no longer in the subscription.`);
     }
 
+    if (config.subscriptionOutputPath) await writeTextFile(config.subscriptionOutputPath, `${vlessNodes.join('\n')}\n`);
+    await generated.commitPorts();
     await maybeReloadSurge(config, surgeProfile.updated);
 
     return {
@@ -1340,6 +1429,7 @@ export const rebuildSurgeFromLocalConfigs = async (config: CliConfig) => {
     proxyLines,
     nodeNames: validEntries.map((entry) => entry.nodeName),
   });
+  await validateSurgeProfile(surgeProfile.updated, config.surgeConfigPath);
   const backupPath = await backupSurgeProfile(config);
   await writeTextFile(config.surgeConfigPath, surgeProfile.updated);
 
@@ -1359,7 +1449,9 @@ export const restoreSurgeProfileBackup = async ({ config, backupPath }: { config
     throw new Error(`No backup files found in ${config.backupDir}`);
   }
 
-  await writeBinaryFile(config.surgeConfigPath, await readJsonCompatibleBinary(targetPath));
+  const restored = await readJsonCompatibleBinary(targetPath);
+  await validateSurgeProfile(restored.toString('utf8'), config.surgeConfigPath);
+  await writeBinaryFile(config.surgeConfigPath, restored);
   await maybeReloadSurge(config, await readTextFile(config.surgeConfigPath));
   return targetPath;
 };
@@ -1389,13 +1481,12 @@ export type DoctorCheck = {
   detail: string;
 };
 
-// Ports are probed by binding them: Surge starts one sing-box per node on portStart+N, and a port
+// Ports are probed by binding them: Surge starts one sing-box per managed node, and a port
 // already taken by something else makes that node fail with no obvious cause.
-const findPortConflicts = async (portStart: number, count: number) => {
+const findPortConflicts = async (ports: number[]) => {
   const conflicts: number[] = [];
 
-  for (let offset = 0; offset < count; offset += 1) {
-    const port = portStart + offset;
+  for (const port of ports) {
     const inUse = await new Promise<boolean>((resolvePromise) => {
       const server = createServer();
       server.once('error', (error: NodeJS.ErrnoException) => resolvePromise(error.code === 'EADDRINUSE'));
@@ -1412,14 +1503,14 @@ const findPortConflicts = async (portStart: number, count: number) => {
 };
 
 export const runCommonDoctorChecks = async (config: CliConfig) => {
-  const subscriptionUrls = getSubscriptionUrls(config);
+  const subscriptionUrls = getSubscriptionUrls(config).filter(url => subscriptionOptionsForUrl(config, url).enabled);
   const vlessNodes = getConfiguredVlessNodes(config);
   const checks: DoctorCheck[] = [];
 
   checks.push({
     label: 'nodeSources',
     level: subscriptionUrls.length + vlessNodes.length > 0 ? 'ok' : 'fail',
-    detail: `${subscriptionUrls.length} subscription URLs, ${vlessNodes.length} direct VLESS nodes`,
+    detail: `${subscriptionUrls.length} active subscription URLs, ${vlessNodes.length} direct VLESS nodes`,
   });
 
   const surgeConfigExists = Boolean(config.surgeConfigPath) && (await pathExists(config.surgeConfigPath));
@@ -1455,14 +1546,16 @@ export const runCommonDoctorChecks = async (config: CliConfig) => {
     });
 
     const httpApi = parseHttpApiSettings(text);
+    const surgeCli = await findSurgeCli();
     checks.push({
-      label: 'surge-http-api',
-      level: !config.autoReload || httpApi ? 'ok' : 'warn',
+      label: 'auto-reload',
+      level: !config.autoReload || httpApi || surgeCli ? 'ok' : 'warn',
       detail: !config.autoReload
         ? 'disabled by config; Surge profile reload is left to the user'
         : httpApi
           ? `${httpApi.origin} (profile reloads automatically)`
-          : 'not enabled; add `http-api = <key>@127.0.0.1:6171` to [General] to reload automatically',
+          : surgeCli ? 'surge-cli available (profile reloads automatically)'
+            : 'Surge CLI unavailable; enable the HTTP API or install Surge to reload automatically',
     });
   }
 
@@ -1503,12 +1596,13 @@ export const runExternalDoctor = async (config: CliConfig) => {
     ? await readManagedConfigEntries(config.outputDir).catch(() => [])
     : [];
   if (managedEntries.length > 0) {
-    const conflicts = await findPortConflicts(config.portStart, managedEntries.length);
+    const ports = managedEntries.map(entry => Number(entry.match(/\[(\d+)\]/)?.[1]));
+    const conflicts = await findPortConflicts(ports);
     // Surge keeps the managed nodes listening, so their own ports read as busy while it is running.
     checks.push({
       label: 'ports',
       level: 'ok',
-      detail: `${config.portStart}-${config.portStart + managedEntries.length - 1}${
+      detail: `${ports.join(', ')}${
         conflicts.length > 0 ? `, ${conflicts.length} in use (expected while Surge is running)` : ''
       }`,
     });

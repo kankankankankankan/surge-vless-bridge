@@ -136,7 +136,7 @@ export class LaunchAgentScheduler {
     }
 
     await mkdir(dirname(this.paths.launchAgentPath), { recursive: true });
-    await mkdir(dirname(this.paths.logPath), { recursive: true });
+    await mkdir(dirname(this.paths.logPath), { recursive: true, mode: 0o700 });
     if (!(await pathExists(this.paths.executablePath))) {
       throw new Error(`应用可执行文件不存在：${this.paths.executablePath}`);
     }

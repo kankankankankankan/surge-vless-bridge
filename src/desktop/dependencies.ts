@@ -295,7 +295,7 @@ export const installOfficialSingBox = async (
       throw new Error('官方发布包中没有找到 sing-box 可执行文件。');
     }
 
-    await mkdir(installDir, { recursive: true });
+    await mkdir(installDir, { recursive: true, mode: 0o700 });
     const targetPath = join(installDir, 'sing-box');
     const nextPath = join(installDir, 'sing-box.next');
     const previousPath = join(installDir, 'sing-box.previous');
