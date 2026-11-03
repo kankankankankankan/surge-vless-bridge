@@ -55,6 +55,7 @@ export type CliConfig = {
   connectTimeoutEnabled: boolean;
   connectTimeoutSeconds: number;
   subscriptionOutputPath: string;
+  subscriptionProxyUrl: string;
   requestHeaders: Record<string, string>;
   addressResolver: AddressResolverConfig;
 };

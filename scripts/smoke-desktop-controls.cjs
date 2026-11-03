@@ -71,6 +71,10 @@ const screenshot = async name => {
   window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message); });
   await window.loadFile(resolve('dist/desktop/renderer/index.html'));
   await until(`document.querySelector('#loading-cover').classList.contains('hidden') && document.querySelectorAll('[data-diagnostic-port]').length===3`);
+  assert.equal(await evaluate(`document.querySelector('#traffic-flow-note').textContent.includes('桥接后端出站')`), true);
+  assert.equal(await evaluate(`document.querySelectorAll('#schedule-run-at-load').length`), 1);
+  assert.equal(await evaluate(`document.querySelector('#schedule-options').classList.contains('is-disabled')`), true);
+  assert.equal(await evaluate(`document.querySelector('#schedule-options').getAttribute('aria-disabled')`), 'true');
   await input('#diagnostic-search', 'HK');
   await click('#diagnostic-select-all');
   assert.equal(await evaluate(`document.querySelectorAll('[data-diagnostic-port]:checked').length`), 2);
@@ -124,6 +128,9 @@ const screenshot = async name => {
         const outside = await evaluate(`Array.from(document.querySelectorAll('.view.active input, .view.active button, .view.active select, .topbar button')).filter(el=>el.getClientRects().length).filter(el=>{const r=el.getBoundingClientRect();return r.left < -1 || r.right > innerWidth+1}).map(el=>el.id || el.textContent)`);
         assert.deepEqual(outside, [], `${view} at ${width}px`);
         assert.equal(await evaluate(`document.querySelectorAll('.view.active i[data-lucide]').length`), 0, 'All visible icons must render');
+        if (view === 'overview' && width <= 850) {
+          assert.equal(await evaluate(`Array.from(document.querySelectorAll('#traffic-flow-track .traffic-flow-arrow')).every(el => getComputedStyle(el).display !== 'none' && getComputedStyle(el).transform !== 'none')`), true, 'Narrow traffic flow must keep directional arrows');
+        }
         const centers = await evaluate(`Array.from(document.querySelectorAll('.topbar-actions .button')).map(button=>{const r=button.getBoundingClientRect(); const children=Array.from(button.children).map(el=>el.getBoundingClientRect()); return Math.abs((Math.min(...children.map(r=>r.top))+Math.max(...children.map(r=>r.bottom)))/2-(r.top+r.bottom)/2);})`);
         assert.ok(centers.every(offset => offset < 2), 'Toolbar content must remain vertically centered');
         if (view === 'schedule') {

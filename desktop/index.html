@@ -166,6 +166,23 @@
             <div><span>节点与监听</span><strong id="engine-summary-nodes">0</strong></div>
           </section>
 
+          <section class="section-block traffic-flow" aria-labelledby="traffic-flow-title">
+            <div class="section-heading">
+              <div><h2 id="traffic-flow-title">当前流量链路</h2><p id="traffic-flow-subtitle">说明实际请求经过哪些组件。</p></div>
+              <span id="traffic-flow-status" class="flow-status">读取中</span>
+            </div>
+            <div class="traffic-flow-track" id="traffic-flow-track">
+              <div class="traffic-flow-node"><i data-lucide="monitor"></i><strong>客户端</strong><small>应用请求</small></div>
+              <span class="traffic-flow-arrow" aria-hidden="true"><i data-lucide="arrow-right"></i></span>
+              <div class="traffic-flow-node"><i data-lucide="shield-check"></i><strong>Surge</strong><small>规则与策略组</small></div>
+              <span class="traffic-flow-arrow" aria-hidden="true"><i data-lucide="arrow-right"></i></span>
+              <div class="traffic-flow-node" id="traffic-flow-backend"><i data-lucide="network"></i><strong>后端</strong><small>本机桥接进程</small></div>
+              <span class="traffic-flow-arrow" aria-hidden="true"><i data-lucide="arrow-right"></i></span>
+              <div class="traffic-flow-node"><i data-lucide="globe-2"></i><strong>VLESS 节点</strong><small>远程出站</small></div>
+            </div>
+            <p id="traffic-flow-note" class="flow-note"></p>
+          </section>
+
           <section class="section-block workflow-shell">
             <div class="section-heading">
               <div><h2>同步工作流</h2><p id="workflow-summary">正在读取当前进度</p></div>
@@ -358,6 +375,11 @@
               </div>
             </section>
 
+            <section class="section-block form-section">
+              <div class="section-heading"><div><h2>订阅下载</h2><p>直连失败时可使用本机 HTTP/HTTPS 代理重试。留空表示只使用直连。</p></div></div>
+              <label class="field"><span>失败重试代理</span><input id="subscription-proxy-url" type="text" placeholder="http://127.0.0.1:7890" spellcheck="false" /><small class="field-help">只填写代理地址，不包含用户名和密码；代理仅用于下载订阅，不会改变 Surge 或节点流量路径。</small></label>
+            </section>
+
             <div id="mihomo-settings" class="settings-section-stack hidden">
               <section class="section-block form-section">
                 <div class="section-heading"><div><h2>Mihomo 内核安装</h2><p>管理可执行文件、版本与数据目录。</p></div></div>
@@ -382,6 +404,8 @@
                 <div class="advanced-settings-body">
                   <p>Controller 仅监听 127.0.0.1，主要用于状态检查和故障排查。</p>
                   <div class="field-grid two"><label class="field"><span>Controller 端口</span><input id="mihomo-controller-port" type="number" min="1024" max="65535" /></label><label class="field"><span>日志级别</span><select id="mihomo-log-level"><option value="silent">静默</option><option value="error">错误</option><option value="warning">警告</option><option value="info">信息</option><option value="debug">调试</option></select></label></div>
+                  <div class="mihomo-log-heading"><span>最近日志</span><button id="refresh-mihomo-logs" type="button" class="mini-button">刷新</button></div>
+                  <div class="mihomo-log-grid"><label><span>标准输出</span><pre id="mihomo-log-output" class="log-view compact">暂无标准输出日志</pre></label><label><span>错误输出</span><pre id="mihomo-log-error" class="log-view compact">暂无错误日志</pre></label></div>
                 </div>
               </details>
             </div>

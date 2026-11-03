@@ -16,6 +16,7 @@ export type RepairableCheck =
   | 'mihomo-launch-agent'
   | 'mihomo-controller'
   | 'mihomo-listeners'
+  | 'mihomo-update-lock'
   | 'proxy-group-section'
   | 'proxy-section'
   | 'rule-section';
@@ -81,6 +82,7 @@ export type DesktopConfigView = {
   tcpFastOpen: boolean;
   connectTimeoutEnabled: boolean;
   connectTimeoutSeconds: number;
+  subscriptionProxyUrl: string;
   addressResolverStrategy: AddressResolverStrategy;
   addressResolverDohEndpoint: string;
   addressResolverDnsServers: string[];
@@ -127,6 +129,7 @@ export type DesktopState = {
   history: ActivityEntry[];
   schedule: ScheduleSettings;
   schedulerLog: string;
+  mihomoLogs: { output: string; error: string };
   profiles: Array<{ path: string; modifiedAt: string }>;
   policyGroups: PolicyGroupView[];
   environment: {

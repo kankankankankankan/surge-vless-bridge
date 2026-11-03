@@ -210,6 +210,7 @@ export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(c
         nodes = await getVlessSubscriptionNodes({
           subscriptionUrl,
           requestHeaders: config.requestHeaders,
+          proxyUrl: config.subscriptionProxyUrl,
           parseOptions: { skipUnsupported: options.skipUnsupported, onSkipped: reason => skippedReasons.push(reason) },
         });
         nodes.forEach((node, nodeIndex) => parseVlessNode(node, nodeIndex));

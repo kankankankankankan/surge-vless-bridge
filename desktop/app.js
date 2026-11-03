@@ -19,6 +19,7 @@ const labelMap = {
   'mihomo-launch-agent': 'Mihomo 后台服务',
   'mihomo-controller': 'Mihomo Controller',
   'mihomo-listeners': 'Mihomo Listeners',
+  'mihomo-update-lock': 'Mihomo 更新事务',
   outputDir: '节点目录',
   backupDir: '备份目录',
   'proxy-group-section': '策略组区块',
@@ -277,6 +278,7 @@ const doctorAction = (check) => {
       'mihomo-launch-agent',
       'mihomo-controller',
       'mihomo-listeners',
+      'mihomo-update-lock',
       'proxy-group-section',
       'proxy-section',
       'rule-section',
@@ -335,8 +337,37 @@ const renderDiagnostics = () => {
   if (focusedPort) $(`[data-diagnostic-port="${focusedPort}"]`)?.focus({ preventScroll: true });
 };
 
+const renderTrafficFlow = () => {
+  const mihomo = state.config.runtimeMode === 'mihomo';
+  const service = state.environment.mihomoService;
+  const backend = $('#traffic-flow-backend');
+  const status = $('#traffic-flow-status');
+  const subtitle = $('#traffic-flow-subtitle');
+  const note = $('#traffic-flow-note');
+  if (!backend || !status || !subtitle || !note) return;
+  backend.classList.toggle('mihomo', mihomo);
+  backend.querySelector('strong').textContent = mihomo ? 'Mihomo' : 'sing-box External';
+  backend.querySelector('small').textContent = mihomo ? '单进程 + 本机 listeners' : '按节点启动 External';
+  if (mihomo) {
+    const listenerCount = state.diagnosticNodes?.length || state.nodeCount;
+    const ready = Boolean(service.controllerReady && service.serviceMatchesConfig);
+    status.textContent = ready ? '后端已连接' : '后端未连接';
+    status.className = `flow-status ${ready ? 'ready' : 'warning'}`;
+    subtitle.textContent = 'Surge 负责规则与面板，Mihomo 只负责本机 SOCKS5 listener 到 VLESS 节点的出站。';
+    note.textContent = ready
+      ? `Mihomo 当前承载 ${listenerCount} 个本机 listener。系统中看到的 Mihomo 流量属于桥接后端出站，不是额外的一份客户端请求。`
+      : 'Mihomo 尚未确认服务归属或 Controller 状态，先在环境检查中修复后再判断节点流量。';
+  } else {
+    status.textContent = '按需启动';
+    status.className = 'flow-status';
+    subtitle.textContent = 'Surge 通过 External 条目按节点启动 sing-box，规则和策略组仍由 Surge 管理。';
+    note.textContent = 'External 模式下不会常驻一个 Mihomo 网关；每个节点对应一个 sing-box 配置和本机端口。';
+  }
+};
+
 const renderOverview = () => {
   renderDiagnostics();
+  renderTrafficFlow();
   const runtimeModeConfirmed = state.runtimeModeConfirmed;
   const sourceReady = checkByLabel('nodeSources')?.level === 'ok';
   const binaryLabel = state.config.runtimeMode === 'mihomo' ? 'mihomoBinary' : 'singBoxBinary';
@@ -934,6 +965,9 @@ const renderSettings = () => {
   $('#tcp-fast-open').checked = config.tcpFastOpen;
   $('#connect-timeout-enabled').checked = config.connectTimeoutEnabled;
   $('#connect-timeout-seconds').value = String(config.connectTimeoutSeconds);
+  $('#subscription-proxy-url').value = config.subscriptionProxyUrl;
+  $('#mihomo-log-output').textContent = state.mihomoLogs?.output || '暂无标准输出日志';
+  $('#mihomo-log-error').textContent = state.mihomoLogs?.error || '暂无错误日志';
   renderSingBoxDependency();
   renderMihomoDependency();
   updateEngineFields();
@@ -1235,8 +1269,11 @@ const updateScheduleFields = () => {
   const enabled = $('#schedule-enabled').checked;
   const daily = $('#schedule-kind').value === 'daily';
   const customInterval = $('#schedule-interval-preset').value === 'custom';
-  $('#schedule-options').style.opacity = enabled ? '1' : '.55';
-  $('#schedule-options').style.pointerEvents = enabled ? 'auto' : 'none';
+  const scheduleOptions = $('#schedule-options');
+  scheduleOptions.classList.toggle('is-disabled', !enabled);
+  scheduleOptions.setAttribute('aria-disabled', String(!enabled));
+  scheduleOptions.style.opacity = '1';
+  scheduleOptions.style.pointerEvents = enabled ? 'auto' : 'none';
   $('#interval-field').classList.toggle('hidden', daily);
   $('#daily-fields').classList.toggle('hidden', !daily);
   $('#schedule-custom-interval').classList.toggle('hidden', !customInterval);
@@ -1467,6 +1504,7 @@ $$('[data-action]').forEach((button) =>
 $$('[data-workflow]').forEach((button) => button.addEventListener('click', () => runWorkflowAction(button.dataset.workflow)));
 $('#next-action-button').addEventListener('click', () => runWorkflowAction(nextAction));
 $('#refresh-state').addEventListener('click', () => loadState());
+$('#refresh-mihomo-logs').addEventListener('click', () => loadState(false));
 
 $('#toggle-secrets').addEventListener('click', () => {
   syncSourceDraftFromDom();
@@ -1774,6 +1812,7 @@ const settingsPayloadFromForm = () => {
     tcpFastOpen: $('#tcp-fast-open').checked,
     connectTimeoutEnabled: $('#connect-timeout-enabled').checked,
     connectTimeoutSeconds: Number($('#connect-timeout-seconds').value),
+    subscriptionProxyUrl: $('#subscription-proxy-url').value,
     addressResolverStrategy: $('#resolver-strategy').value,
     addressResolverDohEndpoint: $('#doh-endpoint').value,
     addressResolverDnsServers: dnsServersFromInput(),

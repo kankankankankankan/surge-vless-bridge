@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,10 +18,13 @@ const scheduledEntryPath = join(
   'desktop',
   'scheduled-run.js',
 );
+const undiciPath = join(appRoot, 'Resources', 'app.asar.unpacked', 'node_modules', 'undici', 'index.js');
 const profilePath = join(root, 'profile.conf');
 const configPath = join(root, 'config.json');
 
 try {
+  const undiciStat = await stat(undiciPath).catch(() => undefined);
+  if (!undiciStat?.isFile()) throw new Error('Packaged app is missing the undici runtime dependency.');
   await writeFile(
     profilePath,
     ['[Proxy]', 'DIRECT = direct', '', '[Proxy Group]', 'Proxy = select, DIRECT', '', '[Rule]', 'FINAL,Proxy', ''].join(

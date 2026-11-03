@@ -133,3 +133,33 @@ export const installAndVerifyMihomo = async ({
     if (!retainBackup) await rm(lockDir, { recursive: true, force: true });
   }
 };
+
+export const recoverMihomoUpdate = async ({
+  installDir,
+  readVersion = readMihomoVersion,
+}: {
+  installDir: string;
+  readVersion?: (binaryPath: string) => Promise<string>;
+}) => {
+  const lockDir = join(installDir, '.mihomo-update.lock');
+  if (!(await pathExists(lockDir))) throw new Error('没有发现可恢复的 Mihomo 更新事务。');
+  const targetPath = join(installDir, 'mihomo');
+  if (await pathExists(targetPath) && (await lstat(targetPath)).isSymbolicLink()) {
+    throw new Error('托管更新目标是符号链接，请使用对应安装来源恢复。');
+  }
+  const candidates = [join(lockDir, 'binary'), join(lockDir, 'previous-binary')];
+  const sourcePath = (await pathExists(candidates[0]!))
+    ? candidates[0]
+    : (await pathExists(candidates[1]!)) ? candidates[1] : undefined;
+  if (!sourcePath) throw new Error('更新事务目录中没有可恢复的旧版 Mihomo 文件。');
+  const staged = `${targetPath}.recover`;
+  await copyFile(sourcePath, staged);
+  try {
+    await readVersion(staged);
+    await rename(staged, targetPath);
+    await rm(lockDir, { recursive: true, force: true });
+    return { path: targetPath, source: sourcePath };
+  } finally {
+    await rm(staged, { force: true });
+  }
+};

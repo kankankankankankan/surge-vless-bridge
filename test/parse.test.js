@@ -253,3 +253,20 @@ test('HTTP and fetch errors do not expose provider-controlled status text or URL
     return true;
   });
 });
+
+test('retries a failed subscription download through the configured proxy', async (t) => {
+  let attempts = 0;
+  const mock = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('direct route unavailable');
+    assert.ok(options.dispatcher);
+    return new Response('proxies: [{type: vless, server: proxy.example, port: 443, uuid: u}]', { status: 200 });
+  });
+  const nodes = await getVlessSubscriptionNodes({
+    subscriptionUrl: 'https://sub.example/private',
+    proxyUrl: 'http://127.0.0.1:7890',
+  });
+  assert.equal(nodes.length, 1);
+  assert.equal(attempts, 2);
+  mock.mock.restore();
+});

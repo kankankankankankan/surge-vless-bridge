@@ -31,7 +31,7 @@ import {
   inspectMihomoVersion,
   rollbackOfficialMihomo,
 } from '../mihomo/dependencies';
-import { installAndVerifyMihomo } from '../mihomo/update';
+import { installAndVerifyMihomo, recoverMihomoUpdate } from '../mihomo/update';
 import {
   getMihomoServiceStatus,
   installMihomoLaunchAgent,
@@ -240,6 +240,7 @@ export class DesktopService {
     const backupKeep = Number(input.backupKeep);
     const connectTimeoutSeconds = Number(input.connectTimeoutSeconds);
     const mihomoControllerPort = Number(input.mihomoControllerPort);
+    const subscriptionProxyUrl = input.subscriptionProxyUrl.trim();
     if (!Number.isInteger(portStart) || portStart < 1024 || portStart > 65535) {
       throw new Error('起始端口必须在 1024 到 65535 之间。');
     }
@@ -254,6 +255,17 @@ export class DesktopService {
     }
     if (!['silent', 'error', 'warning', 'info', 'debug'].includes(input.mihomoLogLevel)) {
       throw new Error('Mihomo 日志级别无效。');
+    }
+    if (subscriptionProxyUrl) {
+      let proxy: URL;
+      try {
+        proxy = new URL(subscriptionProxyUrl);
+      } catch {
+        throw new Error('订阅代理地址格式无效，请使用 http:// 或 https:// 地址。');
+      }
+      if (!['http:', 'https:'].includes(proxy.protocol) || proxy.toString().includes('@')) {
+        throw new Error('订阅代理仅支持不带认证信息的 HTTP 或 HTTPS 地址。');
+      }
     }
 
     const policyGroupName = input.policyGroupName.trim() || 'VLESS';
@@ -334,6 +346,7 @@ export class DesktopService {
       tcpFastOpen: Boolean(input.tcpFastOpen),
       connectTimeoutEnabled: Boolean(input.connectTimeoutEnabled),
       connectTimeoutSeconds,
+      subscriptionProxyUrl,
       addressResolver: {
         strategy: input.addressResolverStrategy,
         dohEndpoint,
@@ -446,6 +459,7 @@ export class DesktopService {
       history,
       schedule,
       schedulerLog,
+      mihomoLogs,
       subscriptionStatuses,
       diagnosticNodes,
     ] = await Promise.all([
@@ -462,6 +476,10 @@ export class DesktopService {
       readHistory(this.historyPath),
       this.scheduler.getSettings(),
       readLogTail(this.schedulerLogPath),
+      Promise.all([
+        readLogTail(join(loaded.config.mihomo.dataDir, 'logs', 'mihomo.log'), 32 * 1024),
+        readLogTail(join(loaded.config.mihomo.dataDir, 'logs', 'mihomo-error.log'), 32 * 1024),
+      ]),
       readSubscriptionStatuses(loaded.config, [loaded.config.subscriptionUrl, ...(loaded.config.subscriptionUrls ?? [])].filter((value): value is string => Boolean(value))),
       loaded.config.runtimeMode === 'mihomo'
         ? readMihomoNodes(loaded.config).then(nodes => nodes.map(({ name, port }) => ({ name, port }))).catch(() => [])
@@ -508,6 +526,7 @@ export class DesktopService {
         tcpFastOpen: loaded.config.tcpFastOpen,
         connectTimeoutEnabled: loaded.config.connectTimeoutEnabled,
         connectTimeoutSeconds: loaded.config.connectTimeoutSeconds,
+        subscriptionProxyUrl: loaded.config.subscriptionProxyUrl,
         addressResolverStrategy: loaded.config.addressResolver.strategy,
         addressResolverDohEndpoint: loaded.config.addressResolver.dohEndpoint,
         addressResolverDnsServers: loaded.config.addressResolver.dnsServers,
@@ -521,6 +540,7 @@ export class DesktopService {
       history,
       schedule,
       schedulerLog,
+      mihomoLogs: { output: mihomoLogs[0], error: mihomoLogs[1] },
       profiles: profiles.map((profile) => ({ path: profile.path, modifiedAt: new Date(profile.mtimeMs).toISOString() })),
       policyGroups: inspectPolicyGroups({ surgeText, policyGroupName: loaded.config.policyGroupName }),
       environment: {
@@ -599,6 +619,15 @@ export class DesktopService {
           message = check === 'mihomo-controller' ? 'Mihomo 已重启，正在重新连接 Controller。' : 'Mihomo 已重启，listener 已重建。';
         }
         output = message;
+      } else if (check === 'mihomo-update-lock') {
+        const installDir = join(dirname(this.configPath), 'bin');
+        const status = await getMihomoServiceStatus(loaded.config);
+        if (status.loaded || status.controllerReady) {
+          throw new Error('Mihomo 服务仍在运行，请先停止服务后再恢复更新事务。');
+        }
+        const result = await recoverMihomoUpdate({ installDir });
+        message = '已恢复中断的 Mihomo 更新事务。';
+        output = `${result.path}\n来源：${result.source}`;
       } else {
         if (!loaded.config.surgeConfigPath || !(await pathExists(loaded.config.surgeConfigPath))) {
           throw new Error('请先选择有效的 Surge 配置文件。');

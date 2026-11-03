@@ -10,7 +10,9 @@
 
 **Surge Mac VLESS support with selectable sing-box External and Mihomo gateway runtimes.** External mode keeps the existing per-node process model. Mihomo mode uses one background process with loopback SOCKS5 listeners.
 
-Surge Mac does not natively support the VLESS protocol. This tool bridges the gap: it fetches your subscription, generates a `sing-box` config per node, and keeps your Surge profile updated — so VLESS nodes work seamlessly through Surge's rules, policy groups, and dashboard.
+Surge Mac does not natively support the VLESS protocol. This tool bridges the gap: it reads raw, Base64,
+Clash YAML, or Clash JSON subscriptions, keeps the last valid result from each source, and updates your Surge
+profile without discarding working nodes when one provider is temporarily unavailable.
 
 ## Prerequisites
 
@@ -19,9 +21,14 @@ Surge Mac does not natively support the VLESS protocol. This tool bridges the ga
 
 ## macOS desktop app
 
-The Electron desktop app manages subscriptions, selects the runtime, previews profile changes, runs syncs,
-repairs the local environment, installs or updates either core, restores backups, and creates a background
-macOS schedule. Existing configurations continue to use External mode.
+The Electron desktop app manages named subscriptions, selects the runtime, previews profile changes, runs
+syncs, repairs the local environment, installs or updates either core, restores backups, and creates a
+background macOS schedule. It also shows the active traffic path, recent Mihomo logs, interrupted-update
+recovery, and an optional HTTP/HTTPS proxy retry used only when a subscription cannot be downloaded directly.
+Existing configurations continue to use External mode.
+
+The schedule is installed as a per-user macOS LaunchAgent. After it is enabled, the desktop window does not
+need to remain open for scheduled syncs to run.
 
 ```bash
 npm install
@@ -152,6 +159,7 @@ Created by `init`. Default path: `~/.config/surge-vless-bridge/config.json`.
   "tcpFastOpen": false,
   "connectTimeoutEnabled": false,
   "connectTimeoutSeconds": 10,
+  "subscriptionProxyUrl": "",
   "addressResolver": {
     "strategy": "doh",
     "filterSurgeFakeIp": true,
@@ -197,6 +205,7 @@ subscription that returns no VLESS nodes is reported as a warning rather than fa
 | `tcpFastOpen`        | `false`                                | Enable TCP Fast Open for sing-box remote connections   |
 | `connectTimeoutEnabled` | `false`                             | Use a custom remote connection timeout in External mode |
 | `connectTimeoutSeconds` | `10`                               | External mode remote connection timeout in seconds     |
+| `subscriptionProxyUrl` | `""`                                | HTTP/HTTPS proxy used only to retry failed subscription downloads |
 | `addressResolver`    | see below                              | How to resolve proxy server domains for `addresses=`   |
 
 Enable `udpRelay` when VLESS should carry UDP traffic used by games, QUIC, voice calls, or UDP DNS.
@@ -206,6 +215,9 @@ does not support UDP or when only TCP traffic is needed.
 When `udpTestEnabled` is enabled, external proxy entries include `test-udp=hostname@IPv4`. It requires `udpRelay`; the default target is `apple.com@8.8.8.8`.
 
 `tcpFastOpen` is supported by both runtimes. The custom connection timeout is an External-only sing-box dial field and emits `connect_timeout=Ns` in each generated outbound. Mihomo uses its kernel default because its VLESS proxy schema has no per-proxy `connect-timeout` field.
+
+`subscriptionProxyUrl` is tried only after the direct subscription request fails. It accepts an unauthenticated
+`http://` or `https://` proxy URL and does not change Surge traffic or VLESS node routing.
 
 `addressResolver.strategy` can be:
 

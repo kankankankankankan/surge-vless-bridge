@@ -160,8 +160,27 @@ input[type="checkbox"] { accent-color: #007aff; }
 .engine-summary > div { min-width: 0; padding: 14px 16px; background: #fff; }
 .engine-summary span, .service-status span { display: block; color: #6a747a; font-size: 12px; margin-bottom: 4px; }
 .engine-summary strong, .service-status strong { display: block; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
+.traffic-flow { padding-bottom: 16px; }
+.traffic-flow .section-heading { align-items: center; }
+.traffic-flow-track { display: grid; grid-template-columns: minmax(110px, 1fr) 28px minmax(110px, 1fr) 28px minmax(130px, 1.15fr) 28px minmax(110px, 1fr); align-items: center; gap: 8px; }
+.traffic-flow-node { display: grid; grid-template-columns: 26px minmax(0, 1fr); grid-template-rows: auto auto; align-items: center; column-gap: 8px; min-width: 0; padding: 11px 12px; border: 1px solid #e1e4e6; border-radius: 7px; background: #fafbfb; }
+.traffic-flow-node svg { grid-row: 1 / -1; width: 17px; height: 17px; color: #63747c; }
+.traffic-flow-node strong, .traffic-flow-node small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.traffic-flow-node strong { color: #30373b; font-size: 12px; }
+.traffic-flow-node small { margin-top: 3px; color: #778187; font-size: 10px; }
+.traffic-flow-node.mihomo { border-color: #9db7c2; background: #f3f8fa; }
+.traffic-flow-arrow { display: grid; place-items: center; color: #9aa5aa; }
+.traffic-flow-arrow svg { width: 15px; height: 15px; }
+.flow-status { padding: 4px 8px; border-radius: 999px; color: #657177; background: #f0f2f3; font-size: 10px; font-weight: 650; white-space: nowrap; }
+.flow-status.ready { color: #246443; background: #edf6f0; }
+.flow-status.warning { color: #936025; background: #fff3df; }
+.flow-note { margin: 12px 0 0; padding: 9px 11px; border-left: 2px solid #c8d2d6; color: #69757b; background: #fafbfb; font-size: 11px; line-height: 1.55; }
 .service-status { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding-top: 14px; border-top: 1px solid #e5e5e9; }
 .service-status .button-row { grid-column: 1 / -1; }
+.mihomo-log-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; color: #4c585e; font-size: 11px; font-weight: 650; }
+.mihomo-log-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 8px; }
+.mihomo-log-grid label { display: grid; gap: 6px; min-width: 0; color: #6e777c; font-size: 10px; }
+.log-view.compact { max-height: 180px; min-height: 80px; margin: 0; padding: 10px; font-size: 10px; line-height: 1.5; }
 
 .section-block.workflow-shell { padding: 0; overflow: hidden; }
 .workflow-shell > .section-heading { padding: 19px 20px 0; }
@@ -396,6 +415,12 @@ input.source-row-input:focus { border: 0; box-shadow: none; }
 .schedule-status > div > span, .schedule-status strong { display: block; }
 .schedule-status div > span { color: #818186; font-size: 10px; }
 .schedule-status strong { margin-top: 3px; color: #2f2f32; font-size: 16px; line-height: 1.25; }
+#schedule-options.is-disabled .schedule-status-icon { color: #66737a; background: #eef1f2; }
+#schedule-options.is-disabled .schedule-status div > span { color: #6f7a80; }
+#schedule-options.is-disabled .schedule-status strong { color: #566269; }
+#schedule-options.is-disabled .field > span, #schedule-options.is-disabled .checkbox-row { color: #5d686e; }
+#schedule-options.is-disabled select, #schedule-options.is-disabled input { opacity: .72; }
+#schedule-options.is-disabled .field-help { color: #7c878c; }
 .interval-controls { display: grid; gap: 8px; min-width: 0; }
 .interval-controls:has(.custom-interval-row:not(.hidden)) { grid-template-columns: minmax(110px, 1fr) minmax(140px, 1fr); align-items: center; }
 .interval-controls > select { width: 100%; }
@@ -404,7 +429,7 @@ input.source-row-input:focus { border: 0; box-shadow: none; }
 .number-suffix:focus-within { border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10, 132, 255, .12); }
 .number-suffix input[type="number"] { height: 34px; padding-right: 4px; border: 0; background: transparent; box-shadow: none; }
 .number-suffix > span { padding: 0 10px 0 4px; color: #77777c; font-size: 11px; font-weight: 500; white-space: nowrap; }
-.log-view { min-height: 144px; max-height: 260px; overflow: auto; margin: 0; padding: 13px; border: 1px solid #dce2e5; border-radius: 6px; color: #445158; background: #f7f9fa; font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.log-view { min-height: 112px; max-height: 260px; overflow: auto; margin: 0; padding: 13px; border: 1px solid #dce2e5; border-radius: 6px; color: #445158; background: #f7f9fa; font-family: "SFMono-Regular", Menlo, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .log-view.large { min-height: 190px; max-height: 320px; }
 .backup-item { display: grid; grid-template-columns: 30px minmax(0, 1fr) 34px; align-items: center; gap: 10px; min-height: 50px; padding: 7px 8px; border-bottom: 1px solid #edf0f2; }
 .backup-item:last-child { border-bottom: 0; }
@@ -588,6 +613,8 @@ input.source-row-input:focus { border: 0; box-shadow: none; }
 .diagnostic-controls .text-button { min-height: 32px; font-size: 12px; }
 .text-button:disabled { color: #86868b; cursor: default; }
 @media (max-width: 850px) {
+  .traffic-flow-track { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .traffic-flow-arrow { transform: rotate(90deg); }
   .diagnostic-node-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .diagnostic-node-row label { grid-column: 1 / -1; }
 }
@@ -595,6 +622,11 @@ input.source-row-input:focus { border: 0; box-shadow: none; }
 .subscription-statuses p { margin: 10px 0 0; }
 .subscription-statuses .status-warning { color: #936025; }
 .subscription-warning { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; color: #936025; font-size: 13px; margin-bottom: 16px; }
+
+@media (max-width: 620px) {
+  .traffic-flow-track { grid-template-columns: 1fr; }
+  .mihomo-log-grid { grid-template-columns: 1fr; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }

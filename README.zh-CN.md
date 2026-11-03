@@ -10,7 +10,8 @@
 
 **让 Surge Mac 支持 VLESS，并可选择 sing-box External 或 Mihomo 网关。** External 模式保持原有每节点进程，Mihomo 模式使用单个后台进程和回环 SOCKS5 listeners。
 
-Surge Mac 不原生支持 VLESS 协议。该工具自动拉取订阅、为每个节点生成 `sing-box` 配置、并保持 Surge 配置同步更新，让你继续使用 Surge 的规则、策略组和面板来使用 VLESS 节点。
+Surge Mac 不原生支持 VLESS 协议。该工具可读取明文、Base64、Clash YAML 和 Clash JSON 订阅，
+按来源保留最近一次有效结果，并在某个订阅临时不可用时避免清空仍可工作的节点。
 
 ## 前置条件
 
@@ -19,7 +20,11 @@ Surge Mac 不原生支持 VLESS 协议。该工具自动拉取订阅、为每个
 
 ## macOS 桌面应用
 
-仓库包含 Electron 桌面界面，可以管理订阅、切换运行引擎、预览更新、执行同步、检查并修复环境、安装内核、配置 DNS、恢复备份和管理 macOS 定时任务。旧配置继续使用 External 模式。
+仓库包含 Electron 桌面界面，可以管理带名称的订阅、切换运行引擎、预览更新、执行同步、检查并修复环境、
+安装内核、配置 DNS、恢复备份和管理 macOS 定时任务。界面还会显示当前流量链路、Mihomo 最近日志、
+中断更新恢复，以及仅在订阅直连失败后使用的可选 HTTP/HTTPS 代理重试。旧配置继续使用 External 模式。
+
+定时任务由当前用户的 macOS LaunchAgent 执行。启用并保存后，即使关闭桌面窗口也会继续按计划同步。
 
 ```bash
 npm install
@@ -149,6 +154,7 @@ surge-vless-bridge doctor
   "tcpFastOpen": false,
   "connectTimeoutEnabled": false,
   "connectTimeoutSeconds": 10,
+  "subscriptionProxyUrl": "",
   "addressResolver": {
     "strategy": "doh",
     "filterSurgeFakeIp": true,
@@ -193,6 +199,7 @@ surge-vless-bridge doctor
 | `tcpFastOpen`        | `false`                                | 为 sing-box 远程连接开启 TCP Fast Open |
 | `connectTimeoutEnabled` | `false`                             | External 模式使用自定义远程连接超时   |
 | `connectTimeoutSeconds` | `10`                               | External 模式的远程连接超时秒数             |
+| `subscriptionProxyUrl` | `""`                                | 仅在订阅直连失败后重试的 HTTP/HTTPS 代理地址 |
 | `addressResolver`    | 见下方                                 | 为 `addresses=` 解析节点服务器域名    |
 
 游戏、QUIC、语音通话或 UDP DNS 需要经过 VLESS 时，可以开启 `udpRelay`。生成的 sing-box SOCKS 入站支持
@@ -201,6 +208,9 @@ UDP ASSOCIATE。上游节点不支持 UDP，或只需要 TCP 流量时保持关�
 开启 `udpTestEnabled` 后，Surge external 节点会增加 `test-udp=域名@IPv4`。该项依赖 `udpRelay`，默认测试目标为 `apple.com@8.8.8.8`。
 
 `tcpFastOpen` 在两种引擎中均可用。自定义连接超时仅用于 External，会向 sing-box outbound 写入 `connect_timeout=秒数s`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，因此使用内核默认值。
+
+`subscriptionProxyUrl` 只在订阅直连失败后使用，支持不带认证信息的 `http://` 或 `https://` 代理地址。
+它不会改变 Surge 流量路径或 VLESS 节点路由。
 
 `addressResolver.strategy` 可选：
 

@@ -154,6 +154,7 @@ export const getDefaultConfig = async (_cwd: string): Promise<CliConfig> => {
     connectTimeoutEnabled: false,
     connectTimeoutSeconds: 10,
     subscriptionOutputPath: join(stateDir, 'vless_nodes.txt'),
+    subscriptionProxyUrl: '',
     requestHeaders: { ...DEFAULT_HEADERS },
     addressResolver: { ...DEFAULT_ADDRESS_RESOLVER },
   };

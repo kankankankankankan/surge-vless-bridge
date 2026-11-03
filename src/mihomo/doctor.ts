@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createConnection } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import {
@@ -63,6 +63,13 @@ export const runMihomoDoctor = async (config: CliConfig) => {
   checks.splice(4, 0, { label: 'mihomo-config', level: configLevel, detail: configDetail });
 
   const service = await getMihomoServiceStatus(config);
+  const updateLockPath = join(dirname(config.mihomo.binary), '.mihomo-update.lock');
+  const updateLockPresent = await pathExists(updateLockPath);
+  checks.push({
+    label: 'mihomo-update-lock',
+    level: updateLockPresent ? 'fail' : 'ok',
+    detail: updateLockPresent ? `recovery required: ${updateLockPath}` : 'no interrupted update transaction',
+  });
   const expectedLevel: DoctorCheck['level'] = configExists ? 'fail' : 'warn';
   checks.push({
     label: 'mihomo-launch-agent',

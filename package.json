@@ -61,7 +61,8 @@
     "asarUnpack": [
       "dist/**/*.js",
       "dist/**/*.map",
-      "node_modules/yaml/**/*"
+      "node_modules/yaml/**/*",
+      "node_modules/undici/**/*"
     ],
     "files": [
       "dist/**/*",
@@ -123,6 +124,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "undici": "^6.29.1",
     "yaml": "^2.9.1"
   }
 }

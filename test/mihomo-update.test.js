@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { createHash } = require('node:crypto');
 const { gzipSync } = require('node:zlib');
-const { installAndVerifyMihomo } = require('../dist/mihomo/update.js');
+const { installAndVerifyMihomo, recoverMihomoUpdate } = require('../dist/mihomo/update.js');
 const { matchesMihomoLaunchService } = require('../dist/mihomo/launch-agent.js');
 const { installOfficialMihomo } = require('../dist/mihomo/dependencies.js');
 const { makeConfig } = require('./helpers.js');
@@ -108,6 +108,24 @@ test('rollback failure retains recovery files and blocks a second update', async
   await assert.rejects(installAndVerifyMihomo(f.options, f.operations), /备份保留/);
   assert.equal(await readFile(path.join(f.installDir, '.mihomo-update.lock', 'binary'), 'utf8'), 'old-binary');
   await assert.rejects(installAndVerifyMihomo(f.options, f.operations), /待恢复事务/);
+});
+
+test('recovers a retained update transaction from the old binary snapshot', async (t) => {
+  const f = await fixture(t, false);
+  const lockDir = path.join(f.installDir, '.mihomo-update.lock');
+  await mkdir(lockDir);
+  await writeFile(path.join(lockDir, 'binary'), 'recoverable-old-binary');
+  await writeFile(f.config.mihomo.binary, 'broken-candidate');
+  const result = await recoverMihomoUpdate({
+    installDir: f.installDir,
+    readVersion: async candidate => {
+      assert.equal(await readFile(candidate, 'utf8'), 'recoverable-old-binary');
+      return '1.0.0';
+    },
+  });
+  assert.equal(result.path, f.config.mihomo.binary);
+  assert.equal(await readFile(f.config.mihomo.binary, 'utf8'), 'recoverable-old-binary');
+  assert.equal((await readdir(f.installDir)).includes('.mihomo-update.lock'), false);
 });
 
 test('an unrelated service is rejected before downloading or changing files', async (t) => {
