@@ -908,6 +908,11 @@ export class DesktopService {
           ? await persistMihomoControllerSecret({ config: loaded.config, configPath: loaded.configPath })
           : loaded.config;
       const targetConfig: CliConfig = { ...baseConfig, runtimeMode: targetMode, runtimeModeConfirmed: false };
+      if (targetMode === 'mihomo' && originalMihomoStatus.loaded && originalMihomoStatus.serviceMatchesConfig) {
+        // Switching engines must create a fresh Mihomo process so stale DNS and connection
+        // state cannot make the result depend on a previous engine switch.
+        await this.dependencies.stopMihomoService();
+      }
       await this.dependencies.switchSync(targetConfig, { dryRun: true });
       if (targetMode === 'external') {
         await this.dependencies.stopMihomoService();

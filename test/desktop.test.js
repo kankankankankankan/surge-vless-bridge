@@ -316,6 +316,42 @@ test('engine switch restores config, Surge text and an installed stopped service
   assert.equal(JSON.parse(await readFile(configPath, 'utf8')).runtimeMode, 'external');
 });
 
+test('switching to Mihomo restarts a matching existing service before syncing', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-switch-restart-'));
+  const configPath = path.join(root, 'config.json');
+  const profilePath = path.join(root, 'profile.conf');
+  await writeFile(profilePath, PROFILE_TEXT, 'utf8');
+  await writeFile(configPath, JSON.stringify({
+    runtimeMode: 'external',
+    runtimeModeConfirmed: true,
+    mihomo: { binary: '/tmp/mihomo', dataDir: path.join(root, 'mihomo'), controllerSecret: 'secret' },
+    vlessNodes: [vlessLink(1, 'Restart')],
+    surgeConfigPath: profilePath,
+    singBoxBinary: '/usr/bin/true',
+    outputDir: path.join(root, 'nodes'),
+    backupDir: path.join(root, 'backups'),
+    subscriptionOutputPath: path.join(root, 'vless_nodes.txt'),
+    addressResolver: 'off',
+    autoReload: false,
+  }), 'utf8');
+  const calls = [];
+  const service = new DesktopService({
+    configPath,
+    executablePath: '/usr/bin/node',
+    scheduledEntryPath: path.join(root, 'scheduled-run.js'),
+    dependencies: {
+      readMihomoServiceStatus: async () => ({ installed: true, loaded: true, controllerReady: true, serviceMatchesConfig: true }),
+      stopMihomoService: async () => { calls.push('stop'); },
+      switchSync: async (_config, options = {}) => { calls.push(options.dryRun ? 'dry-run' : 'sync'); return { count: 1 }; },
+      writeConfigFile: async (target, text) => writeFile(target, text, 'utf8'),
+    },
+  });
+
+  const result = await service.switchEngine('mihomo');
+  assert.equal(result.success, true);
+  assert.deepEqual(calls, ['stop', 'dry-run', 'sync']);
+});
+
 test('desktop log hides the known Electron launchd warning and keeps useful sync output', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'svb-desktop-log-'));
   const logPath = path.join(root, 'scheduler.log');

@@ -1,4 +1,5 @@
 import { stringify } from 'yaml';
+import { isIP } from 'node:net';
 
 import type { CliConfig } from '../types/cli-config';
 import type { SingBoxVlessOutbound } from '../types/sing-box-vless-outbound';
@@ -50,11 +51,14 @@ export const mapVlessToMihomoProxy = (
   outbound: SingBoxVlessOutbound,
   name: string,
   config: Pick<CliConfig, 'udpRelay' | 'tcpFastOpen'>,
-) => ({
+): Record<string, unknown> => ({
   name,
   type: 'vless',
   server: outbound.server,
   port: outbound.server_port,
+  // Keep Mihomo's domain resolution aligned with sing-box External, which prefers IPv4
+  // for node endpoints. Literal IPv6 nodes must remain untouched.
+  ...(isIP(outbound.server) === 0 ? { 'ip-version': 'ipv4-prefer' } : {}),
   uuid: outbound.uuid,
   udp: config.udpRelay,
   ...(config.tcpFastOpen ? { tfo: true } : {}),

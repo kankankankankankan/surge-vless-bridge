@@ -50,6 +50,14 @@ test('maps TLS REALITY and supported connection options to a Mihomo VLESS proxy'
   assert.equal(proxy.udp, true);
   assert.equal(proxy.tfo, true);
   assert.equal(proxy['connect-timeout'], undefined);
+  assert.equal(proxy['ip-version'], 'ipv4-prefer');
+});
+
+test('keeps literal IPv6 Mihomo endpoints on their original address family', async () => {
+  const { config } = await makeConfig('mihomo-ipv6-endpoint');
+  const outbound = parseVlessNode('vless://u@[2001:db8::1]:443#IPv6', 0);
+  const proxy = mapVlessToMihomoProxy(outbound, 'IPv6', config);
+  assert.equal(proxy['ip-version'], undefined);
 });
 
 test('maps websocket, grpc and http upgrade transports', async () => {
