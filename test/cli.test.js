@@ -65,7 +65,7 @@ test('help shows the metadata footer with version and links', async () => {
   assert.equal(code, 0);
   assert.match(stdout, /^Use VLESS subscriptions in Surge Mac/);
   assert.match(stdout, /^Usage:\n {2}surge-vless-bridge <command> \[flags\]$/m);
-  assert.match(stdout, /^Version {7}\d+\.\d+\.\d+$/m);
+  assert.match(stdout, /^Version {7}\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/m);
   assert.match(stdout, /^Homepage {6}https:\/\/github\.com\/chen86860\/surge-vless-bridge$/m);
   assert.match(stdout, /^Issues {8}https:\/\/github\.com\/chen86860\/surge-vless-bridge\/issues$/m);
 });
@@ -143,6 +143,6 @@ test('version is reported by both the command and the flag', async () => {
   const viaFlag = await runCli(['sync', '--version']);
 
   assert.equal(viaCommand.code, 0);
-  assert.match(viaCommand.stdout.trim(), /^\d+\.\d+\.\d+$/);
+  assert.match(viaCommand.stdout.trim(), /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   assert.equal(viaFlag.stdout.trim(), viaCommand.stdout.trim());
 });

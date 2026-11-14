@@ -5,6 +5,7 @@ const test = require('node:test');
 const { getVlessSubscriptionNodes, parseSubscriptionNodes } = require('../dist/parse.js');
 const { parseVlessNode } = require('../dist/utils/parse-vless-node.js');
 const { mapVlessToMihomoProxy } = require('../dist/mihomo/config.js');
+const { buildNativeVlessProxyLine } = require('../dist/surge.js');
 const { LEGACY_SUBSCRIPTION_USER_AGENT, subscriptionHeaders } = require('../dist/utils/subscription-headers.js');
 
 test('uses a supported Clash subscription identity for default and legacy browser requests', async t => {
@@ -213,10 +214,81 @@ test('preserves WS early data and maps Clash HTTP Upgrade without confusing it w
   const upgraded = convert();
   assert.equal(upgraded.transport.type, 'httpupgrade');
   assert.deepEqual(mapVlessToMihomoProxy(upgraded, 'WS', {})['ws-opts'], proxy['ws-opts']);
-  for (const network of ['http', 'h2', 'xhttp']) {
+  for (const network of ['http', 'h2']) {
     proxy.network = network;
     assert.throws(convert, /network/);
   }
+});
+
+test('imports basic Clash XHTTP options for native Surge conversion', () => {
+  const [link] = parseSubscriptionNodes(JSON.stringify({
+    proxies: [{
+      name: 'XHTTP',
+      type: 'vless',
+      server: 'xhttp.example',
+      port: 443,
+      uuid: 'u',
+      network: 'xhttp',
+      tls: true,
+      'xhttp-opts': { path: '/xhttp', host: 'cdn.example', mode: 'stream-one' },
+    }],
+  }));
+  const outbound = parseVlessNode(link, 0);
+  assert.deepEqual(outbound.transport, {
+    type: 'xhttp',
+    path: '/xhttp',
+    host: 'cdn.example',
+    mode: 'stream-one',
+  });
+});
+
+test('converts native Surge VLESS parameters without an external backend', () => {
+  const outbound = parseVlessNode(
+    'vless://u@example.com:443?security=reality&pbk=PUBLIC&sid=0012&sni=cdn.example&flow=xtls-rprx-vision&type=grpc&serviceName=svc&authority=grpc.example&mode=multi#Native',
+    0,
+  );
+  const line = buildNativeVlessProxyLine({
+    nodeName: 'Native',
+    outbound,
+    config: { tcpFastOpen: true },
+  });
+  assert.equal(
+    line,
+    'Native = vless, example.com, 443, username=u, flow=xtls-rprx-vision, tls=true, reality-public-key=PUBLIC, reality-short-id=0012, sni=cdn.example, grpc=true, grpc-service-name=svc, grpc-authority=grpc.example, grpc-mode=multi, tfo=true, ip-version=prefer-v4',
+  );
+});
+
+test('native VLESS makes TLS explicit for Reality and TLS while leaving plaintext unchanged', () => {
+  for (const [security, tlsExpected] of [
+    ['security=reality&pbk=PUBLIC&sid=0012&sni=sni.example&flow=xtls-rprx-vision', true],
+    ['security=tls&sni=sni.example', true],
+    ['security=none', false],
+  ]) {
+    const line = buildNativeVlessProxyLine({
+      nodeName: 'TLS boundary',
+      outbound: parseVlessNode(`vless://u@node.example:443?${security}`, 0),
+      config: { tcpFastOpen: false },
+    });
+    assert.equal((line.match(/(?:^|, )tls=true(?=,|$)/g) ?? []).length, tlsExpected ? 1 : 0);
+    if (security.includes('reality')) {
+      assert.match(line, /flow=xtls-rprx-vision, tls=true, reality-public-key=PUBLIC, reality-short-id=0012/);
+    }
+  }
+});
+
+test('converts native Surge XHTTP and VLESS Encryption parameters', () => {
+  const outbound = parseVlessNode(
+    'vless://u@cdn.example:443?encryption=mlkem768x25519plus.native.1rtt.KEY&security=tls&type=xhttp&path=%2Fx&host=edge.example&mode=packet-up#X',
+    0,
+  );
+  const line = buildNativeVlessProxyLine({
+    nodeName: 'X',
+    outbound,
+    config: { tcpFastOpen: false },
+  });
+  assert.match(line, /X = vless, cdn\.example, 443, username=u, encryption=mlkem768x25519plus\.native\.1rtt\.KEY, tls=true/);
+  assert.match(line, /xhttp=true, xhttp-path=\/x, xhttp-host=edge\.example, xhttp-mode=packet-up/);
+  assert.match(line, /ip-version=prefer-v4$/);
 });
 
 test('reports provider-only, malformed, and unrecognized content without echoing secrets', () => {

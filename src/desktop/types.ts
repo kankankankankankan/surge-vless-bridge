@@ -1,4 +1,4 @@
-import type { AddressResolverStrategy, PolicyGroupTargetMode, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
+import type { AddressResolverStrategy, MihomoDnsMode, PolicyGroupTargetMode, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
 import type { SingBoxVersionStatus } from './dependencies';
 import type { MihomoVersionStatus } from '../mihomo/dependencies';
 import type { MihomoServiceStatus } from '../mihomo/launch-agent';
@@ -69,6 +69,11 @@ export type DesktopConfigView = {
   mihomoControllerPort: number;
   mihomoAutoStart: boolean;
   mihomoLogLevel: 'silent' | 'error' | 'warning' | 'info' | 'debug';
+  mihomoDnsMode: MihomoDnsMode;
+  mihomoDnsServers: string[];
+  mihomoDohEndpoint: string;
+  mihomoDnsIpv6: boolean;
+  mihomoTcpConcurrent: boolean;
   policyGroupName: string;
   policyGroupTargets: string[];
   policyGroupExclusions: string[];

@@ -24,8 +24,11 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
   const insecure = params.get('insecure');
   const sni = params.get('sni') ?? params.get('serverName');
   const allowInsecure = toBoolean(params.get('allowInsecure'));
+  const certificateFingerprint = params.get('pcs') ?? undefined;
+  const certificateVerifyName = params.get('vcn') ?? undefined;
   const flow = params.get('flow') ?? undefined;
   const packetEncoding = params.get('packetEncoding') ?? params.get('packet_encoding');
+  const encryption = params.get('encryption') ?? undefined;
   const tag = decodeURIComponent(url.hash.replace(/^#/, '')) || `vless-${index + 1}`;
 
   // Without a public key sing-box starts but the reality handshake always fails, which surfaces in
@@ -49,6 +52,9 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
   if (packetEncoding?.toLowerCase() === 'xudp') {
     outbound.packet_encoding = 'xudp';
   }
+  if (encryption) {
+    outbound.encryption = encryption;
+  }
 
   if (security === 'tls' || security === 'reality') {
     // `record_fragment` is only meaningful when enabled, and it does not exist before sing-box 1.12.
@@ -58,6 +64,8 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
       enabled: true,
       insecure: toBoolean(insecure),
       alpn: params.has('alpn') ? (params.get('alpn') ?? '').split(',').filter(Boolean) : ['http/1.1'],
+      ...(certificateFingerprint ? { certificate_fingerprint_sha256: certificateFingerprint } : {}),
+      ...(certificateVerifyName ? { certificate_verify_name: certificateVerifyName } : {}),
     };
 
     if (sni) {
@@ -114,6 +122,8 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
     outbound.transport = {
       type: 'grpc',
       service_name: serviceName,
+      ...(params.get('authority') ? { authority: params.get('authority')! } : {}),
+      ...(params.get('mode') ? { mode: params.get('mode')! } : {}),
     };
   }
 
@@ -125,6 +135,16 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
       type: 'httpupgrade',
       path,
       host: hostHeader ?? host,
+    };
+  }
+
+  if (type === 'xhttp' || type === 'splithttp') {
+    outbound.transport = {
+      type: 'xhttp',
+      path: params.get('path') ?? '/',
+      ...(params.get('host') ? { host: params.get('host')! } : {}),
+      ...(params.get('mode') ? { mode: params.get('mode')! } : {}),
+      ...(params.get('extra') ? { extra: params.get('extra')! } : {}),
     };
   }
 

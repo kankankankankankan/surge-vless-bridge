@@ -1,6 +1,7 @@
-export type AddressResolverStrategy = 'system' | 'doh' | 'dns' | 'off';
+export type AddressResolverStrategy = 'system' | 'doh' | 'dot' | 'dns' | 'off';
 export type PolicyGroupTargetMode = 'auto' | 'merge' | 'reference';
-export type RuntimeMode = 'external' | 'mihomo';
+export type RuntimeMode = 'external' | 'mihomo' | 'surge-native';
+export type MihomoDnsMode = 'inherit' | 'dns' | 'doh' | 'dot' | 'system';
 
 export type SubscriptionOptions = {
   enabled: boolean;
@@ -17,6 +18,11 @@ export type MihomoConfig = {
   controllerSecret: string;
   autoStart: boolean;
   logLevel: 'silent' | 'error' | 'warning' | 'info' | 'debug';
+  dnsMode: MihomoDnsMode;
+  dnsServers: string[];
+  dohEndpoint: string;
+  dnsIpv6: boolean;
+  tcpConcurrent: boolean;
 };
 
 export type AddressResolverConfig = {

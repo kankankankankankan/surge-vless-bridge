@@ -49,12 +49,6 @@
           </div>
         </header>
 
-        <div id="loading-cover" class="loading-cover">
-          <div class="spinner"></div>
-          <span>正在读取配置</span>
-          <button id="reload-app" type="button" class="button secondary hidden">重新读取</button>
-        </div>
-
         <section id="engine-onboarding" class="engine-onboarding hidden" role="dialog" aria-modal="true" aria-labelledby="engine-onboarding-title">
           <div class="engine-onboarding-panel">
             <div class="engine-onboarding-heading">
@@ -78,7 +72,7 @@
                   <span class="engine-choice-copy">
                     <span class="engine-choice-title"><strong>sing-box External</strong><em>兼容优先</em></span>
                     <small>保留 Surge external 写法，每个节点按需启动一个 sing-box 进程。</small>
-                    <span class="engine-choice-meta">适合现有配置或节点数量较少</span>
+                  <span class="engine-choice-meta">适合现有配置或节点数量较少</span>
                   </span>
                   <i class="engine-choice-check" data-lucide="circle-check"></i>
                 </button>
@@ -88,6 +82,15 @@
                     <span class="engine-choice-title"><strong>Mihomo 网关</strong><em>集中管理</em></span>
                     <small>Surge 连接本地 SOCKS5，由单个 Mihomo 后台进程承载全部节点。</small>
                     <span class="engine-choice-meta">适合节点较多，需要统一后台管理</span>
+                  </span>
+                  <i class="engine-choice-check" data-lucide="circle-check"></i>
+                </button>
+                <button id="engine-onboarding-native" type="button" class="engine-choice" data-onboarding-runtime-mode="surge-native" role="radio" aria-checked="false">
+                  <span class="engine-choice-icon"><i data-lucide="radio-tower"></i></span>
+                  <span class="engine-choice-copy">
+                    <span class="engine-choice-title"><strong>Surge 原生 VLESS</strong><em>零外部内核</em></span>
+                    <small>直接生成 Surge 原生 VLESS 节点，不启动 sing-box 或 Mihomo。</small>
+                    <span class="engine-choice-meta">需要 Surge Mac 6.12.0 或更高版本</span>
                   </span>
                   <i class="engine-choice-check" data-lucide="circle-check"></i>
                 </button>
@@ -110,6 +113,9 @@
                 </div>
                 <div id="onboarding-mihomo-install-progress" class="install-progress hidden" role="status" aria-live="polite"></div>
               </div>
+              <div id="onboarding-native-actions" class="onboarding-engine-actions hidden">
+                <span>无需安装外部内核。请确认 Surge Mac 版本为 6.12.0 或更高。</span>
+              </div>
             </div>
 
             <div id="setup-step-sources" class="setup-step hidden" data-setup-step="2">
@@ -123,7 +129,7 @@
               <label class="field"><span>Surge 配置文件</span><div class="input-action"><input id="wizard-surge-config-path" type="text" /><button id="wizard-choose-surge-profile" type="button" class="icon-button" title="选择文件"><i data-lucide="folder-open"></i></button></div></label>
               <div class="field-grid two">
                 <label class="field"><span>VLESS 策略组名称</span><input id="wizard-policy-group-name" type="text" /></label>
-                <label class="field"><span>起始端口</span><input id="wizard-port-start" type="number" min="1024" max="65535" /></label>
+                <label class="field"><span>起始端口</span><input id="wizard-port-start" type="number" min="1024" max="65535" /><small class="field-help">从填写的端口开始分配，遇到占用自动跳过。范围 1024～65535。</small></label>
                 <label class="field"><span>保留备份数量</span><input id="wizard-backup-keep" type="number" min="1" max="200" /></label>
               </div>
               <div class="wizard-options">
@@ -329,7 +335,7 @@
         <section id="view-settings" class="view">
           <form id="settings-form" class="form-layout narrow">
             <section class="section-block form-section">
-              <div class="section-heading"><div><h2>运行引擎</h2><p>External 保留原有方式，Mihomo 使用单进程多监听后台网关。</p></div><button id="open-setup-wizard" type="button" class="button secondary"><i data-lucide="list-restart"></i><span>配置向导</span></button></div>
+              <div class="section-heading"><div><h2>运行引擎</h2><p>可选择 External、Mihomo 网关或 Surge 原生 VLESS。</p></div><button id="open-setup-wizard" type="button" class="button secondary"><i data-lucide="list-restart"></i><span>配置向导</span></button></div>
               <div id="runtime-mode-control" class="engine-switch-grid" role="radiogroup" aria-label="运行引擎">
                 <button id="runtime-mode-external" type="button" class="engine-switch-option" data-runtime-mode="external" role="radio">
                   <span class="engine-switch-icon"><i data-lucide="boxes"></i></span>
@@ -339,6 +345,11 @@
                 <button id="runtime-mode-mihomo" type="button" class="engine-switch-option" data-runtime-mode="mihomo" role="radio">
                   <span class="engine-switch-icon"><i data-lucide="network"></i></span>
                   <span><span class="engine-switch-title"><strong>Mihomo 网关</strong><em class="engine-current-tag">当前</em></span><small>改为本地 SOCKS5，由一个后台进程集中承载。</small></span>
+                  <i class="engine-switch-check" data-lucide="circle-check"></i>
+                </button>
+                <button id="runtime-mode-native" type="button" class="engine-switch-option" data-runtime-mode="surge-native" role="radio">
+                  <span class="engine-switch-icon"><i data-lucide="radio-tower"></i></span>
+                  <span><span class="engine-switch-title"><strong>Surge 原生 VLESS</strong><em class="engine-current-tag">当前</em></span><small>直接写入 Surge 原生 VLESS，要求 Surge Mac 6.12.0+。</small></span>
                   <i class="engine-switch-check" data-lucide="circle-check"></i>
                 </button>
               </div>
@@ -399,6 +410,54 @@
                 <div class="service-status"><div><span>后台服务</span><strong id="mihomo-service-state">未启动</strong></div><div><span>Controller</span><strong id="mihomo-controller-state">未连接</strong></div><div class="button-row"><button id="start-mihomo" type="button" class="button secondary"><i data-lucide="play"></i><span>启动</span></button><button id="restart-mihomo" type="button" class="button secondary"><i data-lucide="rotate-cw"></i><span>重启</span></button><button id="stop-mihomo" type="button" class="button secondary"><i data-lucide="square"></i><span>停止</span></button></div></div>
               </section>
 
+              <section class="section-block form-section">
+                <div class="section-heading"><div><h2>节点 DNS</h2><p>仅解析 VLESS 节点服务器域名，不会接管系统 DNS，也不会改变代理流量访问的网站域名。</p></div></div>
+                <label class="field">
+                  <span>常用方案</span>
+                  <select id="mihomo-dns-preset">
+                    <optgroup label="推荐">
+                      <option value="inherit">跟随 sing-box 节点解析 · 自动同步下方设置</option>
+                      <option value="custom-dns">内网 / 自定义 DNS · 手动填写地址</option>
+                    </optgroup>
+                    <optgroup label="国内加密 DNS">
+                      <option value="alidns-doh">AliDNS DoH · https://dns.alidns.com/dns-query</option>
+                      <option value="alidns-dot">AliDNS DoT · tls://dns.alidns.com:853</option>
+                      <option value="dnspod-doh">DNSPod DoH · https://doh.pub/dns-query</option>
+                      <option value="dnspod-dot">DNSPod DoT · tls://dot.pub:853</option>
+                    </optgroup>
+                    <optgroup label="国际加密 DNS">
+                      <option value="cloudflare-doh">Cloudflare DoH · https://1.1.1.1/dns-query</option>
+                      <option value="google-doh">Google DoH · https://dns.google/dns-query</option>
+                      <option value="quad9-doh">Quad9 DoH · https://dns.quad9.net/dns-query</option>
+                      <option value="custom-doh">其他 DoH · 手动填写 HTTPS 地址</option>
+                      <option value="custom-dot">其他 DoT · 手动填写 tls:// 地址</option>
+                    </optgroup>
+                    <optgroup label="传统 DNS">
+                      <option value="cloudflare-dns">Cloudflare DNS · 1.1.1.1 / 1.0.0.1</option>
+                      <option value="google-dns">Google DNS · 8.8.8.8 / 8.8.4.4</option>
+                      <option value="quad9-dns">Quad9 DNS · 9.9.9.9 / 149.112.112.112</option>
+                    </optgroup>
+                    <optgroup label="系统">
+                      <option value="system">macOS 系统 DNS · system</option>
+                    </optgroup>
+                  </select>
+                  <small id="mihomo-dns-help" class="field-help"></small>
+                </label>
+                <label id="mihomo-dns-servers-field" class="field hidden"><span>DNS 服务器</span><textarea id="mihomo-dns-servers" class="code-input compact" rows="3" spellcheck="false" placeholder="192.168.1.1&#10;1.1.1.1"></textarea><small class="field-help">每行一个 IPv4 或 IPv6 DNS 地址。</small></label>
+                <label id="mihomo-doh-endpoint-field" class="field hidden"><span id="mihomo-encrypted-dns-label">加密 DNS 地址</span><input id="mihomo-doh-endpoint" type="text" placeholder="https://1.1.1.1/dns-query" spellcheck="false" /><small id="mihomo-encrypted-dns-help" class="field-help">DoH 使用 HTTPS，DoT 使用 tls://。</small></label>
+                <div class="connection-options">
+                  <div class="connection-option">
+                    <div><strong>查询 IPv6 地址</strong><span>查询节点服务器的 AAAA 记录；域名同时有 IPv4 时仍优先使用 IPv4。</span></div>
+                    <label class="switch"><input id="mihomo-dns-ipv6" type="checkbox" aria-label="查询节点服务器 IPv6 地址" /><span></span></label>
+                  </div>
+                  <div class="connection-option">
+                    <div><strong>并发尝试解析地址</strong><span>节点域名返回多个 IP 时并发连接，使用最先成功的地址。</span></div>
+                    <label class="switch"><input id="mihomo-tcp-concurrent" type="checkbox" aria-label="并发尝试节点服务器地址" /><span></span></label>
+                  </div>
+                </div>
+                <small class="field-help">保存后执行“立即同步”，Mihomo 配置与后台服务才会更新。</small>
+              </section>
+
               <details class="section-block advanced-settings">
                 <summary><span><strong>高级设置</strong><small>Controller 与日志通常无需日常调整</small></span><i data-lucide="chevron-down"></i></summary>
                 <div class="advanced-settings-body">
@@ -414,7 +473,7 @@
               <div class="section-heading"><div><h2>生成选项</h2><p>设置策略组、端口与连接选项。</p></div></div>
               <div class="field-grid two">
                 <label class="field"><span>VLESS 策略组名称</span><input id="policy-group-name" type="text" /></label>
-                <label class="field"><span>起始端口</span><input id="port-start" type="number" min="1024" max="65535" /></label>
+                <label class="field"><span>起始端口</span><input id="port-start" type="number" min="1024" max="65535" /><small class="field-help">从填写的端口开始分配，遇到占用自动跳过。修改后保存并立即同步；本地重建保留已有端口。范围 1024～65535。</small></label>
                 <label class="field"><span>保留备份数量</span><input id="backup-keep" type="number" min="1" max="200" /></label>
               </div>
               <div class="field">
@@ -458,16 +517,35 @@
             <section id="external-resolver-settings" class="section-block form-section">
               <div class="section-heading"><div><h2>节点服务器域名解析</h2><p>同步时解析 VLESS 节点的服务器域名，并写入 Surge external 节点的 addresses。不会影响代理流量访问的网站域名。</p></div></div>
               <label class="field">
-                <span>服务器域名解析方式</span>
-                <select id="resolver-strategy">
-                  <option value="doh">DoH，加密查询</option>
-                  <option value="dns">指定 DNS 服务器</option>
-                  <option value="system">macOS 系统 DNS</option>
-                  <option value="off">关闭地址解析</option>
+                <span>常用方案</span>
+                <select id="resolver-preset">
+                  <optgroup label="国内加密 DNS">
+                    <option value="alidns-doh">AliDNS DoH · https://dns.alidns.com/dns-query</option>
+                    <option value="alidns-dot">AliDNS DoT · tls://dns.alidns.com:853</option>
+                    <option value="dnspod-doh">DNSPod DoH · https://doh.pub/dns-query</option>
+                    <option value="dnspod-dot">DNSPod DoT · tls://dot.pub:853</option>
+                  </optgroup>
+                  <optgroup label="国际加密 DNS">
+                    <option value="cloudflare-doh">Cloudflare DoH · https://1.1.1.1/dns-query</option>
+                    <option value="google-doh">Google DoH · https://dns.google/dns-query</option>
+                    <option value="quad9-doh">Quad9 DoH · https://dns.quad9.net/dns-query</option>
+                    <option value="custom-doh">其他 DoH · 手动填写 HTTPS 地址</option>
+                    <option value="custom-dot">其他 DoT · 手动填写 tls:// 地址</option>
+                  </optgroup>
+                  <optgroup label="指定 DNS">
+                    <option value="custom-dns">内网 / 自定义 DNS · 手动填写地址</option>
+                    <option value="cloudflare-dns">Cloudflare DNS · 1.1.1.1 / 1.0.0.1</option>
+                    <option value="google-dns">Google DNS · 8.8.8.8 / 8.8.4.4</option>
+                    <option value="quad9-dns">Quad9 DNS · 9.9.9.9 / 149.112.112.112</option>
+                  </optgroup>
+                  <optgroup label="系统">
+                    <option value="system">macOS 系统 DNS · system</option>
+                    <option value="off">关闭地址解析 · 不写入 addresses</option>
+                  </optgroup>
                 </select>
                 <small id="resolver-help" class="field-help"></small>
               </label>
-              <label id="doh-endpoint-field" class="field"><span>DoH 地址</span><input id="doh-endpoint" type="text" placeholder="https://1.1.1.1/dns-query" /><small class="field-help">使用 HTTPS DNS JSON 查询。默认值为 Cloudflare。</small></label>
+              <label id="doh-endpoint-field" class="field"><span id="external-encrypted-dns-label">加密 DNS 地址</span><input id="doh-endpoint" type="text" placeholder="https://1.1.1.1/dns-query" /><small id="external-encrypted-dns-help" class="field-help">DoH 使用 HTTPS，DoT 使用 tls://。</small></label>
               <label id="dns-servers-field" class="field hidden"><span>DNS 服务器</span><textarea id="dns-servers" class="code-input compact" rows="3" spellcheck="false" placeholder="1.1.1.1&#10;8.8.8.8"></textarea><small class="field-help">每行一个地址，也支持用逗号分隔。IPv4 和 IPv6 均可。</small></label>
               <label class="checkbox-row"><input id="filter-surge-fake-ip" type="checkbox" /><span>过滤节点服务器解析结果中的 Surge Fake IP 198.18.0.0/15</span></label>
             </section>
@@ -479,6 +557,12 @@
           </form>
         </section>
       </main>
+    </div>
+
+    <div id="loading-cover" class="loading-cover" data-startup-pending="true" role="status" aria-live="polite" aria-modal="false" aria-labelledby="loading-status" tabindex="-1">
+      <div class="spinner"></div>
+      <span id="loading-status">正在读取配置</span>
+      <button id="reload-app" type="button" class="button secondary hidden">重新读取</button>
     </div>
 
     <div id="preview-overlay" class="preview-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="preview-title">

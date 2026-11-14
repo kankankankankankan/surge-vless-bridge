@@ -1,4 +1,4 @@
-# dependencies (bun install)
+# dependencies (npm install)
 node_modules
 
 # output
@@ -43,3 +43,14 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # local Swift prototype
 Package.swift
 Sources/
+
+# local agent instructions and development handoffs
+**/AGENTS.md
+**/CLAUDE.md
+.agents/
+.codex/
+.claude/
+docs/agent-setup.md
+docs/next-agent-development-brief.zh-CN.md
+docs/implementation-todo.zh-CN.md
+docs/dual-engine-mihomo-development.zh-CN.md

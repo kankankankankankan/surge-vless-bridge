@@ -3,6 +3,7 @@ const { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } = require('node:fs
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const { DesktopService } = require('../dist/desktop/service.js');
 const {
@@ -510,6 +511,8 @@ test('desktop exposes named subscriptions, inline engine switching and install p
   assert.match(html, /id="confirm-engine-switch"/);
   assert.match(html, /id="sing-box-install-progress"/);
   assert.match(html, /id="mihomo-install-progress"/);
+  assert.match(html, /data-runtime-mode="surge-native"/);
+  assert.match(html, /Surge 原生 VLESS/);
   assert.match(html, /<details class="section-block advanced-settings">/);
   assert.match(app, /data-source-name/);
   assert.match(app, /subscriptionNames/);
@@ -530,8 +533,43 @@ test('desktop startup is recoverable and topbar button labels have stable center
   assert.match(boot, /读取配置超时，请重试/);
   assert.match(css, /\.topbar-actions \.button > span \{ display: inline-flex; align-items: center; line-height: 1; \}/);
   assert.match(css, /\.loading-cover\.failed \{ flex-direction: column; \}/);
+  assert.match(css, /\.loading-cover\.window-lock \{ inset: 0; z-index: 120;/);
+  assert.match(css, /\.is-window-locked \.main-content \{ overflow: hidden; \}/);
+  assert.match(css, /\.spinner, \.install-task-spinner, #refresh-state\.is-loading svg \{ animation-duration: 1\.2s !important; animation-iteration-count: infinite !important; \}/);
   assert.match(app, /const STARTUP_TIMEOUT_MS = 12000;/);
+  assert.match(app, /const MIN_STARTUP_COVER_MS = 240;/);
+  assert.match(app, /Keep the startup feedback visible long enough to be perceived/);
+  assert.match(app, /const remaining = MIN_STARTUP_COVER_MS - \(performance\.now\(\) - coverStartedAt\)/);
+  assert.match(app, /setBusy\(true, '正在切换运行引擎', true, true\)/);
+  assert.match(app, /shell\.inert = true/);
+  assert.match(app, /main\.addEventListener\('scroll', keepLockedScrollPosition\)/);
   assert.match(app, /showStartupError\(message\)/);
+});
+
+test('startup watchdog never hides the spinner of a later operation', async () => {
+  const boot = await readFile(path.join(__dirname, '..', 'desktop', 'boot.js'), 'utf8');
+  let watchdog;
+  const coverClasses = new Set();
+  const spinnerClasses = new Set();
+  const message = { textContent: '正在切换运行引擎' };
+  const cover = {
+    dataset: { startupPending: 'false' },
+    classList: { contains: key => coverClasses.has(key), add: key => coverClasses.add(key) },
+    querySelector: selector => selector === '.spinner' ? { classList: { add: key => spinnerClasses.add(key) } } : message,
+  };
+  vm.runInNewContext(boot, {
+    document: { querySelector: selector => selector === '#loading-cover' ? cover : { addEventListener() {}, classList: { remove() {} } } },
+    window: { setTimeout: callback => { watchdog = callback; } },
+  });
+  watchdog();
+  assert.equal(spinnerClasses.has('hidden'), false);
+  assert.equal(coverClasses.has('failed'), false);
+  assert.equal(message.textContent, '正在切换运行引擎');
+  cover.dataset.startupPending = 'true';
+  watchdog();
+  assert.equal(spinnerClasses.has('hidden'), true);
+  assert.equal(coverClasses.has('failed'), true);
+  assert.equal(message.textContent, '读取配置超时，请重试');
 });
 
 test('desktop preview keeps its controls and columns inside narrow windows', async () => {
@@ -607,6 +645,11 @@ test('desktop settings preserve editable DNS resolver values', async () => {
     addressResolverDohEndpoint: 'https://dns.google/resolve',
     addressResolverDnsServers: ['9.9.9.9', '2620:fe::fe'],
     addressResolverFilterSurgeFakeIp: false,
+    mihomoDnsMode: 'dns',
+    mihomoDnsServers: ['192.0.2.53', '192.0.2.53', '1.1.1.1'],
+    mihomoDohEndpoint: 'https://dns.example/dns-query',
+    mihomoDnsIpv6: false,
+    mihomoTcpConcurrent: false,
     udpRelay: true,
     udpTestEnabled: true,
     udpTestTarget: 'example.com@1.1.1.1',
@@ -630,6 +673,28 @@ test('desktop settings preserve editable DNS resolver values', async () => {
   assert.equal(saved.tcpFastOpen, true);
   assert.equal(saved.connectTimeoutEnabled, true);
   assert.equal(saved.connectTimeoutSeconds, 20);
+  assert.equal(saved.mihomo.dnsMode, 'dns');
+  assert.deepEqual(saved.mihomo.dnsServers, ['192.0.2.53', '1.1.1.1']);
+  assert.equal(saved.mihomo.dohEndpoint, 'https://dns.example/dns-query');
+  assert.equal(saved.mihomo.dnsIpv6, false);
+  assert.equal(saved.mihomo.tcpConcurrent, false);
+
+  const withDot = await service.getState();
+  const beforeInvalidPort = await readFile(configPath, 'utf8');
+  await assert.rejects(service.saveSettings({ ...withDot.config, portStart: 60 }), /1024 到 65535/);
+  assert.equal(await readFile(configPath, 'utf8'), beforeInvalidPort);
+  await service.saveSettings({
+    ...withDot.config,
+    addressResolverStrategy: 'dot',
+    addressResolverDohEndpoint: 'tls://dns.alidns.com:853',
+    mihomoDnsMode: 'dot',
+    mihomoDohEndpoint: 'tls://dot.pub:853',
+  });
+  const dotSaved = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.equal(dotSaved.addressResolver.strategy, 'dot');
+  assert.equal(dotSaved.addressResolver.dohEndpoint, 'tls://dns.alidns.com:853');
+  assert.equal(dotSaved.mihomo.dnsMode, 'dot');
+  assert.equal(dotSaved.mihomo.dohEndpoint, 'tls://dot.pub:853');
 });
 
 test('desktop environment repair creates directories and backs up section changes', async () => {

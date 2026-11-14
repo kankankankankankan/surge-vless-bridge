@@ -90,11 +90,20 @@ test('renders loopback-only listeners and SOCKS5 Surge options', async () => {
   config.udpTestEnabled = true;
   config.udpTestTarget = 'apple.com@8.8.8.8';
   config.tcpFastOpen = true;
+  config.addressResolver.strategy = 'doh';
   const outbound = parseVlessNode(vlessLink(1, 'Tokyo'), 0);
   const nodes = [{ name: 'Tokyo', port: 2081, server: outbound.server, proxy: mapVlessToMihomoProxy(outbound, 'Tokyo', config) }];
   const document = parse(renderMihomoConfig({ nodes, config }));
   assert.equal(document['external-controller'], '127.0.0.1:19090');
+  assert.equal(document['tcp-concurrent'], true);
   assert.equal(document.secret, 'local-secret');
+  assert.deepEqual(document.dns, {
+    enable: true,
+    ipv6: true,
+    'default-nameserver': ['1.1.1.1', '8.8.8.8'],
+    nameserver: ['https://1.1.1.1/dns-query'],
+    'proxy-server-nameserver': ['https://1.1.1.1/dns-query'],
+  });
   assert.deepEqual(document.listeners[0], {
     name: 'surge-vless-2081',
     type: 'socks',
@@ -107,6 +116,51 @@ test('renders loopback-only listeners and SOCKS5 Surge options', async () => {
     buildMihomoSurgeProxyLine({ name: 'Tokyo', port: 2081, config }),
     'Tokyo = socks5, 127.0.0.1, 2081, udp-relay=true, test-udp=apple.com@8.8.8.8, tfo=true',
   );
+});
+
+test('renders dedicated Mihomo DNS modes and disables AAAA resolution when requested', async () => {
+  const { config } = await makeConfig('mihomo-dns-modes');
+  const outbound = parseVlessNode(vlessLink(1, 'DNS'), 0);
+
+  config.mihomo.dnsMode = 'dns';
+  config.mihomo.dnsServers = ['192.0.2.53', '1.1.1.1'];
+  config.mihomo.dnsIpv6 = false;
+  let proxy = mapVlessToMihomoProxy(outbound, 'DNS', config);
+  let document = parse(renderMihomoConfig({ nodes: [{ name: 'DNS', port: 2081, server: outbound.server, proxy }], config }));
+  assert.equal(proxy['ip-version'], 'ipv4');
+  assert.equal(document.ipv6, false);
+  assert.deepEqual(document.dns['default-nameserver'], ['192.0.2.53', '1.1.1.1', '8.8.8.8']);
+  assert.deepEqual(document.dns.nameserver, ['192.0.2.53', '1.1.1.1']);
+  assert.deepEqual(document.dns['proxy-server-nameserver'], ['192.0.2.53', '1.1.1.1']);
+
+  config.mihomo.dnsMode = 'doh';
+  config.mihomo.dohEndpoint = 'https://dns.example/dns-query';
+  document = parse(renderMihomoConfig({ nodes: [{ name: 'DNS', port: 2081, server: outbound.server, proxy }], config }));
+  assert.deepEqual(document.dns.nameserver, ['https://dns.example/dns-query']);
+
+  config.mihomo.dnsMode = 'dot';
+  config.mihomo.dohEndpoint = 'tls://dns.alidns.com:853';
+  document = parse(renderMihomoConfig({ nodes: [{ name: 'DNS', port: 2081, server: outbound.server, proxy }], config }));
+  assert.deepEqual(document.dns.nameserver, ['tls://dns.alidns.com:853']);
+
+  config.mihomo.dnsMode = 'system';
+  document = parse(renderMihomoConfig({ nodes: [{ name: 'DNS', port: 2081, server: outbound.server, proxy }], config }));
+  assert.deepEqual(document.dns.nameserver, ['system']);
+});
+
+test('inherits the External resolver for Mihomo node domains', async () => {
+  const { config } = await makeConfig('mihomo-inherit-resolver');
+  const outbound = parseVlessNode(vlessLink(1, 'DNS'), 0);
+  const nodes = [{ name: 'DNS', port: 2081, server: outbound.server, proxy: mapVlessToMihomoProxy(outbound, 'DNS', config) }];
+  config.mihomo.dnsMode = 'inherit';
+  config.addressResolver.strategy = 'dns';
+  config.addressResolver.dnsServers = ['192.0.2.53'];
+  let document = parse(renderMihomoConfig({ nodes, config }));
+  assert.deepEqual(document.dns.nameserver, ['192.0.2.53']);
+
+  config.addressResolver.strategy = 'off';
+  document = parse(renderMihomoConfig({ nodes, config }));
+  assert.deepEqual(document.dns.nameserver, ['system']);
 });
 
 test('manages the Mihomo process rule without touching user rules', async () => {
@@ -219,6 +273,20 @@ test('desktop exposes runtime controls without exposing the controller secret', 
   assert.match(html, /id="runtime-mode-mihomo"/);
   assert.match(html, /id="mihomo-settings"/);
   assert.match(html, /id="mihomo-service-state"/);
+  assert.match(html, /id="mihomo-dns-preset"/);
+  assert.match(html, /Cloudflare DoH/);
+  assert.match(html, /Google DoH/);
+  assert.match(html, /Quad9 DoH/);
+  assert.match(html, /AliDNS DoH · https:\/\/dns\.alidns\.com\/dns-query/);
+  assert.match(html, /AliDNS DoT · tls:\/\/dns\.alidns\.com:853/);
+  assert.match(html, /DNSPod DoH · https:\/\/doh\.pub\/dns-query/);
+  assert.match(html, /DNSPod DoT · tls:\/\/dot\.pub:853/);
+  assert.match(html, /id="resolver-preset"/);
+  assert.match(html, /id="mihomo-dns-servers"/);
+  assert.match(html, /id="mihomo-doh-endpoint"/);
+  assert.match(html, /id="mihomo-dns-ipv6"/);
+  assert.match(html, /id="mihomo-tcp-concurrent"/);
+  assert.match(app, /Surge 增强模式下可能得到 Fake IP/);
   assert.match(html, /id="engine-onboarding"/);
   assert.match(html, /id="engine-onboarding-external"/);
   assert.match(html, /id="engine-onboarding-mihomo"/);
@@ -245,7 +313,7 @@ test('desktop exposes runtime controls without exposing the controller secret', 
   assert.doesNotMatch(types, /DesktopConfigView[\s\S]*controllerSecret:/);
 });
 
-test('desktop keeps shared generation settings visible and scopes resolver settings to External', async () => {
+test('desktop keeps shared generation settings visible and provides engine-specific resolver settings', async () => {
   const html = await readFile(path.join(__dirname, '..', 'desktop', 'index.html'), 'utf8');
   const app = await readFile(path.join(__dirname, '..', 'desktop', 'app.js'), 'utf8');
   const sharedSection = html.match(/<section id="shared-generation-settings"[\s\S]*?<\/section>/)?.[0] ?? '';
@@ -254,7 +322,13 @@ test('desktop keeps shared generation settings visible and scopes resolver setti
   assert.match(sharedSection, /id="policy-group-name"/);
   assert.match(sharedSection, /id="port-start"/);
   assert.match(resolverSection, /<h2>节点服务器域名解析<\/h2>/);
+  assert.match(resolverSection, /id="resolver-preset"/);
+  assert.match(resolverSection, /AliDNS DoH/);
+  assert.match(resolverSection, /DNSPod DoT/);
+  assert.match(html, /<h2>节点 DNS<\/h2>/);
   assert.match(app, /\$\('#external-resolver-settings'\)\.classList\.toggle\('hidden', engineDraftMode !== 'external'\)/);
+  assert.match(app, /const updateMihomoDnsFields = \(\) =>/);
+  assert.match(app, /const applyMihomoDnsPreset = \(\) =>/);
   assert.doesNotMatch(app, /\$\('#shared-generation-settings'\)\.classList\.toggle\('hidden'/);
 });
 

@@ -12,6 +12,8 @@ export type SingBoxTls = {
     public_key: string;
     short_id?: string;
   };
+  certificate_fingerprint_sha256?: string;
+  certificate_verify_name?: string;
 };
 
 export type SingBoxTransport = {
@@ -20,6 +22,9 @@ export type SingBoxTransport = {
   host?: string;
   headers?: Record<string, string>;
   service_name?: string;
+  authority?: string;
+  mode?: string;
+  extra?: string;
   max_early_data?: number;
   early_data_header_name?: string;
 };
@@ -32,6 +37,7 @@ export type SingBoxVlessOutbound = {
   uuid: string;
   flow?: string;
   packet_encoding?: 'xudp';
+  encryption?: string;
   tcp_fast_open?: boolean;
   connect_timeout?: string;
   tls?: SingBoxTls;

@@ -8,15 +8,17 @@
 
 ![Surge VLESS Bridge desktop app](./docs/images/dual-engine-external-1180x780.png)
 
-**Surge Mac VLESS support with selectable sing-box External and Mihomo gateway runtimes.** External mode keeps the existing per-node process model. Mihomo mode uses one background process with loopback SOCKS5 listeners.
+**Surge Mac VLESS support with selectable sing-box External, Mihomo gateway, and Surge native VLESS runtimes.** External mode keeps the existing per-node process model. Mihomo mode uses one background process with loopback SOCKS5 listeners. Native mode writes Surge `vless` policies directly and requires Surge Mac 6.12.0 or newer.
 
-Surge Mac does not natively support the VLESS protocol. This tool bridges the gap: it reads raw, Base64,
+Older Surge Mac versions do not natively support the VLESS protocol. This tool reads raw, Base64,
 Clash YAML, or Clash JSON subscriptions, keeps the last valid result from each source, and updates your Surge
 profile without discarding working nodes when one provider is temporarily unavailable.
 
 ## Prerequisites
 
-- [sing-box](https://github.com/SagerNet/sing-box) installed (`brew install sing-box`)
+- [sing-box](https://github.com/SagerNet/sing-box) installed (`brew install sing-box`) when using External mode
+- Mihomo installed when using the gateway mode; the desktop app can install it
+- Surge Mac 6.12.0 or newer for native VLESS; this mode needs no external core
 - Surge Mac with a profile containing `[Proxy]` and `[Proxy Group]` sections
 
 ## macOS desktop app
@@ -41,23 +43,38 @@ GitHub Actions builds both macOS architectures on native runners. Download `x64`
 `arm64` for Apple Silicon from the workflow run's Artifacts section.
 Pushing a version tag such as `v1.6.0` automatically publishes both verified DMGs and their SHA-256 files to GitHub Releases.
 
-## Setting this up with an AI agent
+## Surge native VLESS
 
-Nothing to install first. Paste this into Claude Code, Cursor, Codex or a similar agent and it handles
-the whole setup — checking for and installing `sing-box` and the CLI, creating the config, syncing, and
-verifying:
+Choose Surge Native VLESS in the desktop setup wizard or under Settings > Runtime Engine. CLI configurations
+use `"runtimeMode": "surge-native"` and require runtime confirmation. Sync updates Surge policies and groups
+directly, retaining previews, backups and scheduled updates without creating local listeners.
 
-```text
-Read https://github.com/kankankankankankan/surge-vless-bridge/blob/master/docs/agent-setup.md
-and set up surge-vless-bridge for me.
+Example Reality + Vision output:
+
+```ini
+[Proxy]
+Example = vless, node.example.com, 443, username=00000000-0000-4000-8000-000000000001, flow=xtls-rprx-vision, tls=true, reality-public-key=YOUR_PUBLIC_KEY, reality-short-id=01234567, sni=tls.example.com, ip-version=prefer-v4
 ```
 
-[docs/agent-setup.md](./docs/agent-setup.md) tells the agent the command order, the config path rules,
-how to read `doctor`, and which commands must not run without your confirmation. It will ask you for
-your subscription URL and confirm your Surge profile path; everything else has a sensible default, and
-it previews with `sync --dry-run` before writing anything.
+This is a syntax example. Replace the domains, user ID, public key and short ID with your own node values.
 
-Prefer to do it yourself? Follow the manual setup below.
+- TLS and Reality policies explicitly emit `tls=true`; plaintext policies omit it. Reality also implies TLS.
+- Surge Reality always uses Chrome's ClientHello. Share-link `fp` and Clash `client-fingerprint` values are not preserved.
+- Reality verifies the server through its own handshake; `skip-cert-verify` does not apply to that verification.
+- Native VLESS includes XUDP and needs no extra `udp-relay=true` parameter.
+- Basic XHTTP conversion is supported. Unmapped XHTTP `extra` options produce an explicit conversion error.
+
+Surge Mac 6.12.0+ can import `vless://` links in its proxy editor: click Import… next to Share Link and paste
+the link. The same entry accepts `Name = vless, ...` policy lines. This import feature belongs to Surge itself.
+
+Native mode resolves node domains using Surge's DNS configuration. The Bridge's External address resolver
+does not change that configuration. External `addresses=` excludes endpoints from VIF routes; it does not
+select the IP dialed by sing-box and does not apply to native policies. Compare the same node, test URL and
+resolved addresses when investigating client differences. Passing syntax validation does not prove connectivity.
+
+References: [Surge VLESS parameters](https://manual.nssurge.com/policies/vless.html),
+[share-link import](https://manual.nssurge.com/policies/overview.html#importing-from-share-links-ios-600-mac-6120),
+and [per-domain DNS](https://manual.nssurge.com/dns/local-dns-mapping.html#assigning-dns-servers).
 
 ## Manual setup
 
@@ -207,6 +224,9 @@ subscription that returns no VLESS nodes is reported as a warning rather than fa
 | `connectTimeoutSeconds` | `10`                               | External mode remote connection timeout in seconds     |
 | `subscriptionProxyUrl` | `""`                                | HTTP/HTTPS proxy used only to retry failed subscription downloads |
 | `addressResolver`    | see below                              | How to resolve proxy server domains for `addresses=`   |
+| `mihomo.dnsMode`     | `"inherit"`                          | Resolve Mihomo node domains by inheritance, dedicated DNS, DoH, DoT, or system DNS |
+| `mihomo.dnsIpv6`     | `true`                                 | Query AAAA records for Mihomo node servers             |
+| `mihomo.tcpConcurrent` | `true`                               | Race multiple resolved node IPs and use the first successful connection |
 
 Enable `udpRelay` when VLESS should carry UDP traffic used by games, QUIC, voice calls, or UDP DNS.
 The generated sing-box SOCKS inbound accepts UDP ASSOCIATE. Leave it disabled when the upstream node
@@ -214,7 +234,7 @@ does not support UDP or when only TCP traffic is needed.
 
 When `udpTestEnabled` is enabled, external proxy entries include `test-udp=hostname@IPv4`. It requires `udpRelay`; the default target is `apple.com@8.8.8.8`.
 
-`tcpFastOpen` is supported by both runtimes. The custom connection timeout is an External-only sing-box dial field and emits `connect_timeout=Ns` in each generated outbound. Mihomo uses its kernel default because its VLESS proxy schema has no per-proxy `connect-timeout` field.
+`tcpFastOpen` is supported by all three runtimes. The custom connection timeout is an External-only sing-box dial field and emits `connect_timeout=Ns` in each generated outbound. Mihomo uses its kernel default because its VLESS proxy schema has no per-proxy `connect-timeout` field. Native mode does not create local listeners or `addresses=` entries.
 
 `subscriptionProxyUrl` is tried only after the direct subscription request fails. It accepts an unauthenticated
 `http://` or `https://` proxy URL and does not change Surge traffic or VLESS node routing.
@@ -224,17 +244,20 @@ When `udpTestEnabled` is enabled, external proxy entries include `test-udp=hostn
 | Strategy | Description                                                                  |
 | -------- | ---------------------------------------------------------------------------- |
 | `doh`    | Resolve with `addressResolver.dohEndpoint`. This is the default.             |
+| `dot`    | Resolve through certificate-verified DoT using a `tls://` endpoint.           |
 | `dns`    | Resolve with `addressResolver.dnsServers`, such as `["1.1.1.1", "8.8.8.8"]`. |
 | `system` | Use Node.js system DNS resolution.                                           |
 | `off`    | Do not write `addresses=` in generated Surge external proxy entries.         |
 
-Every strategy except `off` falls back to the other resolvers when it returns nothing usable, so a
-failing DoH endpoint or a fake-ip system resolver still produces a real address.
+Every strategy except `off` falls back to the other configured resolver types when it returns nothing
+usable, so a failing encrypted endpoint or a fake-ip system resolver can still produce a real address.
 
-Surge accepts a single value in `addresses=`. When a server resolves to several addresses, IPv4 is
-preferred; IPv6 is written only when no A record exists.
+Surge accepts repeated `addresses=` parameters. Every resolved IPv4 and IPv6 address is written,
+with IPv4 addresses first; Surge fake IPs are removed first.
 
 `addressResolver.filterSurgeFakeIp` defaults to `true`. It filters `198.18.0.0/15` addresses before writing `addresses=`, avoiding Surge fake-ip results being pinned into external proxy entries.
+
+Mihomo resolves node server domains at runtime through its own DNS module. `mihomo.dnsMode` accepts `inherit`, `dns`, `doh`, `dot`, or `system`; dedicated values come from `mihomo.dnsServers` and `mihomo.dohEndpoint`. The desktop app shares one editable preset catalog between Mihomo and External, displays endpoint values in every choice, and includes AliDNS and DNSPod DoH/DoT alongside Cloudflare, Google, and Quad9. Generated configs set `proxy-server-nameserver` explicitly and do not expose a DNS listener. With Surge Enhanced Mode enabled, prefer dedicated DNS, DoH, DoT, or an inherited non-system resolver so the macOS system resolver cannot return fake IPs for node domains.
 
 ### Why the default is `doh`
 
@@ -344,5 +367,4 @@ informed our Mihomo gateway design. Its [automatic update documentation](https:/
 is also a reference for future update verification and recovery work.
 Our implementation runs a separate Mihomo executable with per-node loopback listeners;
 Surge External Bridge embeds Mihomo and routes nodes through an authenticated shared SOCKS5 endpoint.
-See our [reference review](docs/dual-engine-mihomo-development.zh-CN.md#20-mihomo-参考项目与更新评估2026-10-31)
-for the reviewed revision, adoption recommendations and license boundary.
+This project retains its MIT license. Citations and acknowledgements do not imply incorporation of GPL source from the reference project.

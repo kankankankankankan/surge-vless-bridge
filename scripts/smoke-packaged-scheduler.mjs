@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = await mkdtemp(join(tmpdir(), 'surge-vless-desktop-smoke-'));
@@ -8,7 +8,9 @@ const appOutputDir = process.env.SVB_PACKAGED_APP_DIR ?? 'mac-arm64';
 if (!['mac-arm64', 'mac'].includes(appOutputDir)) {
   throw new Error(`Unsupported packaged app directory: ${appOutputDir}`);
 }
-const appRoot = join(process.cwd(), 'release', appOutputDir, 'Surge VLESS Bridge.app', 'Contents');
+const appRoot = process.argv[2]
+  ? join(resolve(process.argv[2]), 'Contents')
+  : join(process.cwd(), 'release', appOutputDir, 'Surge VLESS Bridge.app', 'Contents');
 const executablePath = join(appRoot, 'MacOS', 'Surge VLESS Bridge');
 const scheduledEntryPath = join(
   appRoot,

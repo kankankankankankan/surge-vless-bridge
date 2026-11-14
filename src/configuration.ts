@@ -128,6 +128,11 @@ export const getDefaultConfig = async (_cwd: string): Promise<CliConfig> => {
       controllerSecret: randomBytes(24).toString('hex'),
       autoStart: true,
       logLevel: 'info',
+      dnsMode: 'inherit',
+      dnsServers: ['1.1.1.1', '8.8.8.8'],
+      dohEndpoint: 'https://1.1.1.1/dns-query',
+      dnsIpv6: true,
+      tcpConcurrent: true,
     },
     subscriptionUrl: '',
     subscriptionUrls: [],
@@ -289,13 +294,16 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
     typeof sanitizedInput.addressResolver === 'string'
       ? { strategy: sanitizedInput.addressResolver }
       : sanitizedInput.addressResolver;
+  const validAddressResolverStrategies = new Set(['doh', 'dot', 'dns', 'system', 'off']);
   const connectTimeoutSeconds = Number(sanitizedInput.connectTimeoutSeconds);
   const udpTestTarget =
     typeof sanitizedInput.udpTestTarget === 'string' && sanitizedInput.udpTestTarget.trim()
       ? sanitizedInput.udpTestTarget.trim()
       : base.udpTestTarget;
   const runtimeMode: RuntimeMode =
-    sanitizedInput.runtimeMode === 'mihomo' || sanitizedInput.runtimeMode === 'external'
+    sanitizedInput.runtimeMode === 'mihomo' ||
+      sanitizedInput.runtimeMode === 'external' ||
+      sanitizedInput.runtimeMode === 'surge-native'
       ? sanitizedInput.runtimeMode
       : base.runtimeMode;
   const runtimeModeConfirmed =
@@ -305,6 +313,15 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
   const mihomoInput = sanitizedInput.mihomo;
   const controllerPort = Number(mihomoInput?.controllerPort);
   const validLogLevels = new Set(['silent', 'error', 'warning', 'info', 'debug']);
+  const validMihomoDnsModes = new Set(['inherit', 'dns', 'doh', 'dot', 'system']);
+  const mihomoDnsServers = [
+    ...new Set(
+      (Array.isArray(mihomoInput?.dnsServers) ? mihomoInput.dnsServers : base.mihomo.dnsServers)
+        .filter((server): server is string => typeof server === 'string')
+        .map((server) => server.trim())
+        .filter(Boolean),
+    ),
+  ];
 
   return {
     ...base,
@@ -328,6 +345,20 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
           ? (mihomoInput.logLevel as CliConfig['mihomo']['logLevel'])
           : base.mihomo.logLevel,
       autoStart: mihomoInput?.autoStart === undefined ? base.mihomo.autoStart : Boolean(mihomoInput.autoStart),
+      dnsMode:
+        typeof mihomoInput?.dnsMode === 'string' && validMihomoDnsModes.has(mihomoInput.dnsMode)
+          ? (mihomoInput.dnsMode as CliConfig['mihomo']['dnsMode'])
+          : base.mihomo.dnsMode,
+      dnsServers: mihomoDnsServers,
+      dohEndpoint:
+        typeof mihomoInput?.dohEndpoint === 'string' && mihomoInput.dohEndpoint.trim()
+          ? mihomoInput.dohEndpoint.trim()
+          : base.mihomo.dohEndpoint,
+      dnsIpv6: mihomoInput?.dnsIpv6 === undefined ? base.mihomo.dnsIpv6 : Boolean(mihomoInput.dnsIpv6),
+      tcpConcurrent:
+        mihomoInput?.tcpConcurrent === undefined
+          ? base.mihomo.tcpConcurrent
+          : Boolean(mihomoInput.tcpConcurrent),
     },
     subscriptionUrls: normalizedSubscriptions?.map((entry) => entry.url) ?? base.subscriptionUrls,
     subscriptionNames:
@@ -352,6 +383,11 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
     addressResolver: {
       ...base.addressResolver,
       ...(addressResolverInput ?? {}),
+      strategy:
+        typeof addressResolverInput?.strategy === 'string' &&
+        validAddressResolverStrategies.has(addressResolverInput.strategy)
+          ? (addressResolverInput.strategy as CliConfig['addressResolver']['strategy'])
+          : base.addressResolver.strategy,
     },
   };
 };

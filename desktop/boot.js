@@ -2,7 +2,8 @@ document.querySelector('#reload-app')?.addEventListener('click', () => location.
 
 window.setTimeout(() => {
   const cover = document.querySelector('#loading-cover');
-  if (!cover || cover.classList.contains('hidden')) return;
+  // A later engine switch may reuse the cover after startup has completed.
+  if (!cover || cover.dataset.startupPending !== 'true' || cover.classList.contains('hidden')) return;
   cover.classList.add('failed');
   cover.querySelector('.spinner')?.classList.add('hidden');
   const message = cover.querySelector('span');

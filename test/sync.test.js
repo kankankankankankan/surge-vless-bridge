@@ -1,9 +1,10 @@
 const assert = require('node:assert/strict');
 const { chmod, readFile, writeFile } = require('node:fs/promises');
+const { createServer } = require('node:http');
 const path = require('node:path');
 const test = require('node:test');
 
-const { rebuildSurgeFromLocalConfigs, syncSubscriptionToSurge } = require('../dist/surge.js');
+const { rebuildSurgeFromLocalConfigs, syncNativeSurgeToSurge, syncSubscriptionToSurge } = require('../dist/surge.js');
 const {
   captureConsole,
   makeConfig,
@@ -25,6 +26,22 @@ test('merges several subscriptions into one policy group', async () => {
 
   assert.equal(result.count, 3);
   assert.equal(await policyGroupLine(config), 'VLESS = url-test, HK 01, JP 01, SG 01, no-alert=0, hidden=0');
+});
+
+test('syncs native Surge VLESS without creating sing-box node files', async () => {
+  const { config } = await makeConfig('surge-native');
+  config.runtimeMode = 'surge-native';
+  config.subscriptionUrls = [subscriptionUrl([vlessLink(1, 'Native')])];
+  config.tcpFastOpen = true;
+
+  const preview = await syncNativeSurgeToSurge(config, { dryRun: true });
+  assert.equal(preview.preview.runtimeMode, 'surge-native');
+  assert.match(preview.preview.validationSummary, /原生 VLESS/);
+
+  const result = await syncNativeSurgeToSurge(config);
+  assert.equal(result.count, 1);
+  assert.match(await readProfile(config), /^Native = vless, example\.com, 443, username=.*ip-version=prefer-v4$/m);
+  assert.deepEqual(await nodeConfigFiles(config), []);
 });
 
 test('writes only documented Surge external policy parameters', async () => {
@@ -509,4 +526,103 @@ test('writes an IPv6 node without the brackets URL parsing adds', async () => {
   assert.equal(json.outbounds[0].server, '2001:db8::1');
 
   assert.match(await readProfile(config), /^IPv6Node = external, .*addresses=2001:db8::1$/m);
+});
+
+test('writes every resolved IPv4 and IPv6 address while filtering Surge fake IPs', async (t) => {
+  const { config } = await makeConfig('multiple-addresses');
+  config.subscriptionUrls = [
+    subscriptionUrl(['vless://00000000-0000-4000-8000-000000000002@node.example:443?encryption=none#MultiAddress']),
+  ];
+
+  const dnsServer = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    const answers = url.searchParams.get('type') === 'A'
+      ? [
+          { type: 1, data: '198.18.0.5' },
+          { type: 1, data: '203.0.113.10' },
+          { type: 1, data: '198.19.0.9' },
+          { type: 1, data: '192.0.2.20' },
+        ]
+      : [{ type: 28, data: '2001:db8::10' }];
+
+    response.setHeader('content-type', 'application/dns-json');
+    response.end(JSON.stringify({ Answer: answers }));
+  });
+  await new Promise((resolve, reject) => {
+    dnsServer.once('error', reject);
+    dnsServer.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => dnsServer.close(resolve)));
+
+  config.addressResolver = {
+    ...config.addressResolver,
+    strategy: 'doh',
+    dohEndpoint: `http://127.0.0.1:${dnsServer.address().port}/dns-query`,
+    filterSurgeFakeIp: true,
+  };
+
+  await syncSubscriptionToSurge(config);
+  const line = (await readProfile(config)).split(/\r?\n/).find((entry) => entry.startsWith('MultiAddress = external,'));
+  const [nodeFile] = await nodeConfigFiles(config);
+
+  assert.equal(
+    line,
+    'MultiAddress = external, exec=/usr/bin/true, args=run, args=-c, args='
+      + path.join(config.outputDir, nodeFile)
+      + ', local-port=2081, addresses=203.0.113.10, addresses=192.0.2.20, addresses=2001:db8::10',
+  );
+  assert.doesNotMatch(line, /198\.(18|19)\./);
+});
+
+test('resolves standard binary DoH responses for External addresses', async (t) => {
+  const { config } = await makeConfig('binary-doh');
+  config.subscriptionUrls = [
+    subscriptionUrl(['vless://00000000-0000-4000-8000-000000000003@binary.example:443?encryption=none#BinaryDoH']),
+  ];
+
+  const dnsServer = createServer((request, response) => {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      const query = Buffer.concat(chunks);
+      const questionEnd = (() => {
+        let offset = 12;
+        while (query[offset] !== 0) offset += query[offset] + 1;
+        return offset + 5;
+      })();
+      const question = query.subarray(12, questionEnd);
+      const type = query.readUInt16BE(questionEnd - 4);
+      const data = type === 1
+        ? Buffer.from([203, 0, 113, 30])
+        : Buffer.from('20010db8000000000000000000000030', 'hex');
+      const answerHeader = Buffer.alloc(12);
+      answerHeader.writeUInt16BE(0xc00c, 0);
+      answerHeader.writeUInt16BE(type, 2);
+      answerHeader.writeUInt16BE(1, 4);
+      answerHeader.writeUInt32BE(60, 6);
+      answerHeader.writeUInt16BE(data.length, 10);
+      const header = Buffer.from(query.subarray(0, 12));
+      header.writeUInt16BE(0x8180, 2);
+      header.writeUInt16BE(1, 4);
+      header.writeUInt16BE(1, 6);
+      header.writeUInt16BE(0, 8);
+      header.writeUInt16BE(0, 10);
+      response.setHeader('content-type', 'application/dns-message');
+      response.end(Buffer.concat([header, question, answerHeader, data]));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    dnsServer.once('error', reject);
+    dnsServer.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise((resolve) => dnsServer.close(resolve)));
+
+  config.addressResolver = {
+    ...config.addressResolver,
+    strategy: 'doh',
+    dohEndpoint: `http://127.0.0.1:${dnsServer.address().port}/dns-query`,
+  };
+  await syncSubscriptionToSurge(config);
+  const line = (await readProfile(config)).split(/\r?\n/).find((entry) => entry.startsWith('BinaryDoH = external,'));
+  assert.match(line, /addresses=203\.0\.113\.30, addresses=2001:db8:0:0:0:0:0:30$/);
 });

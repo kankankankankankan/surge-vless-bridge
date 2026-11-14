@@ -13,6 +13,22 @@ const { makeConfig, subscriptionUrl, vlessLink } = require('./helpers.js');
 
 const identity = name => stableNodeIdentity({ name, server: 'example.com', serverPort: 443, uuid: name });
 
+test('configured start is inclusive and lowering it reallocates ports in both engines', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'svb-port-start-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const ids = ['a', 'b'].map(identity);
+  for (const mode of ['external', 'mihomo']) {
+    const filePath = stablePortFile(root, mode);
+    for (const portStart of [2081, 2080, 2070]) {
+      const plan = await planStablePorts({ filePath, portStart, identities: ids, available: async () => true });
+      assert.deepEqual(plan.ports, [portStart, portStart + 1]);
+      await plan.commit();
+    }
+    const occupied = await planStablePorts({ filePath, portStart: 2060, identities: ids, available: async port => port !== 2060 });
+    assert.deepEqual(occupied.ports, [2061, 2062]);
+  }
+});
+
 test('port plans preserve identities on reorder and skip occupied new ports without writing until committed', async t => {
   const root = await mkdtemp(join(tmpdir(), 'svb-port-map-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -118,6 +134,47 @@ test('Mihomo unchanged and reordered subscriptions verify runtime without rewrit
   assert.deepEqual(doc.listeners.map(node => node.proxy), ['A', 'B']);
   f.config.tcpFastOpen = true;
   await syncMihomoToSurge(f.config, { operations: f.operations });
+  assert.equal(f.starts(), 2);
+});
+
+test('External applies a lower start on sync while local rebuild preserves the installed ports', async t => {
+  const { root, config } = await makeConfig('external-start-change');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.mock.method(surgeCli, 'validateSurgeProfile', async () => ({ checked: true }));
+  config.vlessNodes = [vlessLink(1, 'A'), vlessLink(2, 'B')];
+  config.portStart = 52000;
+  await syncSubscriptionToSurge(config);
+  config.portStart = 51900;
+  const { rebuildSurgeFromLocalConfigs } = require('../dist/surge.js');
+  await rebuildSurgeFromLocalConfigs(config);
+  assert.match(await readFile(config.surgeConfigPath, 'utf8'), /local-port=52000/);
+  const preview = await syncSubscriptionToSurge(config, { dryRun: true });
+  assert.deepEqual(preview.preview.nodes.map(node => node.port), [51900, 51901]);
+  assert.match(await readFile(config.surgeConfigPath, 'utf8'), /local-port=52000/);
+  await syncSubscriptionToSurge(config);
+  const profile = await readFile(config.surgeConfigPath, 'utf8');
+  assert.match(profile, /local-port=51900/);
+  assert.doesNotMatch(profile, /local-port=52000/);
+  const files = (await readdir(config.outputDir)).filter(name => /^sing-box\[\d+\]\.json$/.test(name));
+  assert.deepEqual(files.sort(), ['sing-box[51900].json', 'sing-box[51901].json']);
+  for (const port of [51900, 51901]) {
+    const node = JSON.parse(await readFile(join(config.outputDir, `sing-box[${port}].json`), 'utf8'));
+    assert.equal(node.inbounds[0].listen_port, port);
+  }
+});
+
+test('Mihomo applies a lower start to both Surge policies and listener ports', async t => {
+  const f = await mihomoFixture(t);
+  await syncMihomoToSurge(f.config, { operations: f.operations });
+  f.config.portStart = 44900;
+  const preview = await syncMihomoToSurge(f.config, { dryRun: true, operations: f.operations });
+  assert.deepEqual(preview.preview.nodes.map(node => node.port), [44900, 44901]);
+  await syncMihomoToSurge(f.config, { operations: f.operations });
+  const yaml = parse(await readFile(join(f.config.mihomo.dataDir, 'config.yaml'), 'utf8'));
+  assert.deepEqual(yaml.listeners.map(listener => listener.port), [44900, 44901]);
+  const profile = await readFile(f.config.surgeConfigPath, 'utf8');
+  assert.match(profile, /socks5, 127\.0\.0\.1, 44900/);
+  assert.doesNotMatch(profile, /socks5, 127\.0\.0\.1, 45000/);
   assert.equal(f.starts(), 2);
 });
 

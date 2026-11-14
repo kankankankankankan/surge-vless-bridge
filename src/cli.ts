@@ -59,7 +59,7 @@ const version = () => {
   return cachedVersion;
 };
 
-const helpText = () => `Use VLESS subscriptions in Surge Mac with a local sing-box External or Mihomo gateway runtime.
+const helpText = () => `Use VLESS subscriptions in Surge Mac with sing-box External, Mihomo, or Surge native VLESS.
 
 Usage:
   surge-vless-bridge <command> [flags]
@@ -86,7 +86,8 @@ Config flags:
   --backup-keep <number>     How many backups to keep
 
 Runtime selection:
-  Set runtimeMode to "external" or "mihomo" in the config file.
+  Set runtimeMode to "external", "mihomo", or "surge-native" in the config file.
+  Surge native VLESS requires Surge Mac 6.12.0 or newer and does not need an external core.
   Mihomo paths, controller port and service settings live under the mihomo object.
 
 Command flags:

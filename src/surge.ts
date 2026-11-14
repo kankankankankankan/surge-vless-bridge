@@ -1,10 +1,17 @@
+/**
+ * [INPUT]: 使用订阅解析、配置模型、私有文件写入与 Surge CLI。
+ * [OUTPUT]: 提供 External 和原生 VLESS 同步、策略组编辑、备份与检查。
+ * [POS]: 桥接核心；engines 分发运行方式，Mihomo 复用档案编辑能力。
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { Resolver, lookup } from 'node:dns/promises';
 import { mkdir, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { isIP } from 'node:net';
 import { basename, join, resolve } from 'node:path';
+import { connect as connectTls } from 'node:tls';
 import { promisify } from 'node:util';
 
 import { getVlessSubscriptionNodes } from './parse';
@@ -85,8 +92,8 @@ const isSurgeFakeIp = (address: string) => {
   return first === 198 && (second === 18 || second === 19);
 };
 
-// Surge accepts a single value in `addresses=`, and A/AAAA records arrive in an unstable order.
-// IPv4 comes first so the written address is deterministic and usable on IPv4-only networks.
+// A/AAAA records arrive in an unstable order. IPv4 comes first so the written addresses remain
+// deterministic and usable on IPv4-only networks.
 const uniqueRealAddresses = (addresses: string[], resolverConfig: AddressResolverConfig) =>
   [
     ...new Set(
@@ -109,42 +116,176 @@ const resolveWithDnsServers = async (server: string, dnsServers: string[]) => {
   return settled.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
 };
 
-const queryDohAddresses = async (server: string, recordType: keyof typeof DOH_RECORD_TYPES, dohEndpoint: string) => {
+const encodeDnsName = (name: string) => {
+  const labels = name.replace(/\.$/, '').split('.');
+  const parts = labels.map((label) => {
+    const bytes = Buffer.from(label, 'ascii');
+    if (bytes.length === 0 || bytes.length > 63) throw new Error(`Invalid DNS label in ${name}.`);
+    return Buffer.concat([Buffer.from([bytes.length]), bytes]);
+  });
+  return Buffer.concat([...parts, Buffer.from([0])]);
+};
+
+const buildDnsQuery = (name: string, recordType: keyof typeof DOH_RECORD_TYPES) => {
+  const id = randomInt(0, 0x10000);
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(id, 0);
+  header.writeUInt16BE(0x0100, 2);
+  header.writeUInt16BE(1, 4);
+  const question = Buffer.alloc(4);
+  question.writeUInt16BE(DOH_RECORD_TYPES[recordType], 0);
+  question.writeUInt16BE(1, 2);
+  return { id, packet: Buffer.concat([header, encodeDnsName(name), question]) };
+};
+
+const skipDnsName = (packet: Buffer, start: number) => {
+  let offset = start;
+  while (offset < packet.length) {
+    const length = packet[offset]!;
+    if ((length & 0xc0) === 0xc0) return offset + 2;
+    if (length === 0) return offset + 1;
+    offset += length + 1;
+  }
+  throw new Error('Truncated DNS name.');
+};
+
+const parseDnsAddresses = (
+  packet: Buffer,
+  expectedId: number,
+  recordType: keyof typeof DOH_RECORD_TYPES,
+) => {
+  if (packet.length < 12 || packet.readUInt16BE(0) !== expectedId) throw new Error('Invalid DNS response.');
+  const flags = packet.readUInt16BE(2);
+  if ((flags & 0x8000) === 0 || (flags & 0x000f) !== 0) return [];
+  const questionCount = packet.readUInt16BE(4);
+  const answerCount = packet.readUInt16BE(6);
+  let offset = 12;
+  for (let index = 0; index < questionCount; index += 1) {
+    offset = skipDnsName(packet, offset) + 4;
+    if (offset > packet.length) throw new Error('Truncated DNS question.');
+  }
+
+  const expectedType = DOH_RECORD_TYPES[recordType];
+  const addresses: string[] = [];
+  for (let index = 0; index < answerCount; index += 1) {
+    offset = skipDnsName(packet, offset);
+    if (offset + 10 > packet.length) throw new Error('Truncated DNS answer.');
+    const type = packet.readUInt16BE(offset);
+    const dataLength = packet.readUInt16BE(offset + 8);
+    const dataOffset = offset + 10;
+    const end = dataOffset + dataLength;
+    if (end > packet.length) throw new Error('Truncated DNS record data.');
+    if (type === expectedType && type === 1 && dataLength === 4) {
+      addresses.push([...packet.subarray(dataOffset, end)].join('.'));
+    }
+    if (type === expectedType && type === 28 && dataLength === 16) {
+      addresses.push(
+        Array.from({ length: 8 }, (_, part) => packet.readUInt16BE(dataOffset + part * 2).toString(16)).join(':'),
+      );
+    }
+    offset = end;
+  }
+  return addresses;
+};
+
+const queryDohJsonAddresses = async (
+  server: string,
+  recordType: keyof typeof DOH_RECORD_TYPES,
+  dohEndpoint: string,
+) => {
   const url = new URL(dohEndpoint);
   url.searchParams.set('name', server);
   url.searchParams.set('type', recordType);
-
-  const response = await fetch(url, {
-    headers: {
-      accept: 'application/dns-json',
-    },
-  });
-
-  if (!response.ok) {
-    return [];
-  }
-
-  const payload = (await response.json()) as {
-    Answer?: Array<{
-      type?: number;
-      data?: string;
-    }>;
-  };
-
-  if (!Array.isArray(payload.Answer)) {
-    return [];
-  }
-
+  const response = await fetch(url, { headers: { accept: 'application/dns-json' } });
+  if (!response.ok) return [];
+  const payload = (await response.json()) as { Answer?: Array<{ type?: number; data?: string }> };
+  if (!Array.isArray(payload.Answer)) return [];
   const answerType = DOH_RECORD_TYPES[recordType];
-  return payload.Answer.filter((answer) => answer.type === answerType && typeof answer.data === 'string').map(
-    (answer) => answer.data as string,
-  );
+  return payload.Answer
+    .filter((answer) => answer.type === answerType && typeof answer.data === 'string')
+    .map((answer) => answer.data as string);
+};
+
+const queryDohAddresses = async (server: string, recordType: keyof typeof DOH_RECORD_TYPES, dohEndpoint: string) => {
+  const { id, packet } = buildDnsQuery(server, recordType);
+  try {
+    const response = await fetch(dohEndpoint, {
+      method: 'POST',
+      headers: { accept: 'application/dns-message', 'content-type': 'application/dns-message' },
+      body: packet,
+    });
+    if (response.ok) {
+      return parseDnsAddresses(Buffer.from(await response.arrayBuffer()), id, recordType);
+    }
+  } catch {
+    // Some older DoH endpoints only implement the JSON query form.
+  }
+  return queryDohJsonAddresses(server, recordType, dohEndpoint);
 };
 
 const resolveWithDoh = async (server: string, dohEndpoint: string) => {
   const settled = await Promise.allSettled([
     queryDohAddresses(server, 'A', dohEndpoint),
     queryDohAddresses(server, 'AAAA', dohEndpoint),
+  ]);
+  return settled.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
+};
+
+const queryDotAddresses = async (
+  server: string,
+  recordType: keyof typeof DOH_RECORD_TYPES,
+  dotEndpoint: string,
+) => {
+  const endpoint = new URL(dotEndpoint);
+  const host = endpoint.hostname.replace(/^\[(.*)]$/, '$1');
+  const port = endpoint.port ? Number(endpoint.port) : 853;
+  const { id, packet } = buildDnsQuery(server, recordType);
+
+  return new Promise<string[]>((resolvePromise, reject) => {
+    let response = Buffer.alloc(0);
+    let complete = false;
+    const finish = (error?: Error, addresses?: string[]) => {
+      if (complete) return;
+      complete = true;
+      socket.destroy();
+      if (error) reject(error);
+      else resolvePromise(addresses ?? []);
+    };
+    const socket = connectTls({
+      host,
+      port,
+      ...(isIP(host) ? {} : { servername: host }),
+    });
+    socket.setTimeout(8_000);
+    socket.once('secureConnect', () => {
+      const framed = Buffer.alloc(packet.length + 2);
+      framed.writeUInt16BE(packet.length, 0);
+      packet.copy(framed, 2);
+      socket.write(framed);
+    });
+    socket.on('data', (chunk) => {
+      response = Buffer.concat([response, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+      if (response.length < 2) return;
+      const messageLength = response.readUInt16BE(0);
+      if (response.length < messageLength + 2) return;
+      try {
+        finish(undefined, parseDnsAddresses(response.subarray(2, messageLength + 2), id, recordType));
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    socket.once('timeout', () => finish(new Error('DoT query timed out.')));
+    socket.once('error', (error) => finish(error));
+    socket.once('end', () => {
+      if (!complete) finish(new Error('DoT server closed the connection before responding.'));
+    });
+  });
+};
+
+const resolveWithDot = async (server: string, dotEndpoint: string) => {
+  const settled = await Promise.allSettled([
+    queryDotAddresses(server, 'A', dotEndpoint),
+    queryDotAddresses(server, 'AAAA', dotEndpoint),
   ]);
   return settled.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
 };
@@ -272,10 +413,15 @@ const resolveAddresses = async (server: string, resolverConfig: AddressResolverC
     return uniqueRealAddresses([server], resolverConfig);
   }
 
-  const doh: ResolverAttempt = {
-    label: 'doh',
-    run: () => resolveWithDoh(server, resolverConfig.dohEndpoint),
-  };
+  const encrypted: ResolverAttempt = resolverConfig.strategy === 'dot'
+    ? {
+        label: 'dot',
+        run: () => resolveWithDot(server, resolverConfig.dohEndpoint),
+      }
+    : {
+        label: 'doh',
+        run: () => resolveWithDoh(server, resolverConfig.dohEndpoint),
+      };
   const dns: ResolverAttempt = {
     label: 'dns',
     run: () => resolveWithDnsServers(server, resolverConfig.dnsServers),
@@ -290,10 +436,10 @@ const resolveAddresses = async (server: string, resolverConfig: AddressResolverC
   // resolvers that bypass the system resolver before giving up.
   const chain: ResolverAttempt[] =
     resolverConfig.strategy === 'dns'
-      ? [dns, doh, system]
+      ? [dns, encrypted, system]
       : resolverConfig.strategy === 'system'
-        ? [system, doh, dns]
-        : [doh, dns, system];
+        ? [system, encrypted, dns]
+        : [encrypted, dns, system];
 
   let sawFakeIp = false;
 
@@ -345,7 +491,7 @@ const buildExternalProxyLine = async ({
   udpTestTarget: string;
 }) => {
   const addresses = await resolveAddresses(server, addressResolver);
-  const addressArg = addresses.length > 0 ? `, addresses=${addresses[0]}` : '';
+  const addressArg = addresses.map((address) => `, addresses=${address}`).join('');
   const udpRelayArg = udpRelay ? ', udp-relay=true' : '';
   if (udpRelay && udpTestEnabled) {
     const [hostname, address, extra] = udpTestTarget.split('@');
@@ -380,6 +526,12 @@ const ensureRuntimePaths = async (config: CliConfig) => {
 
   if (!config.singBoxBinary || !(await pathExists(config.singBoxBinary))) {
     throw new Error(`sing-box binary not found: ${config.singBoxBinary || 'missing'}`);
+  }
+};
+
+const ensureSurgeNativePaths = async (config: CliConfig) => {
+  if (!config.surgeConfigPath || !(await pathExists(config.surgeConfigPath))) {
+    throw new Error(`Surge profile not found: ${config.surgeConfigPath || 'missing'}`);
   }
 };
 
@@ -1192,6 +1344,149 @@ export const stablePolicyNames = (outbounds: SingBoxVlessOutbound[], previous: P
   return names;
 };
 
+const quoteSurgeValue = (value: string) => {
+  const normalized = value.replace(/[\r\n]/g, ' ').trim();
+  return /[\s,=]/.test(normalized) ? `"${normalized.replace(/(["\\])/g, '\\$1')}"` : normalized;
+};
+
+const appendSurgeParameter = (parameters: string[], key: string, value?: string) => {
+  if (value === undefined || value === '') return;
+  parameters.push(`${key}=${quoteSurgeValue(value)}`);
+};
+
+export const buildNativeVlessProxyLine = ({
+  nodeName,
+  outbound,
+  config,
+}: {
+  nodeName: string;
+  outbound: SingBoxVlessOutbound;
+  config: Pick<CliConfig, 'tcpFastOpen'>;
+}) => {
+  const parameters = [`${nodeName} = vless`, quoteSurgeValue(outbound.server), String(outbound.server_port)];
+  appendSurgeParameter(parameters, 'username', outbound.uuid);
+  appendSurgeParameter(parameters, 'flow', outbound.flow);
+  appendSurgeParameter(parameters, 'encryption', outbound.encryption);
+
+  if (outbound.tls?.reality?.public_key) {
+    parameters.push('tls=true');
+    appendSurgeParameter(parameters, 'reality-public-key', outbound.tls.reality.public_key);
+    appendSurgeParameter(parameters, 'reality-short-id', outbound.tls.reality.short_id);
+  } else if (outbound.tls?.enabled) {
+    parameters.push('tls=true');
+  }
+  appendSurgeParameter(parameters, 'sni', outbound.tls?.server_name);
+  if (outbound.tls?.insecure) parameters.push('skip-cert-verify=true');
+  if (!outbound.tls?.reality) {
+    appendSurgeParameter(parameters, 'server-cert-fingerprint-sha256', outbound.tls?.certificate_fingerprint_sha256);
+    appendSurgeParameter(parameters, 'server-cert-verify-name', outbound.tls?.certificate_verify_name);
+  }
+  if (outbound.tls?.alpn?.length && !outbound.tls.reality) {
+    appendSurgeParameter(parameters, 'alpn', outbound.tls.alpn.join(','));
+  }
+
+  const transport = outbound.transport;
+  if (transport?.type === 'ws') {
+    parameters.push('ws=true');
+    appendSurgeParameter(parameters, 'ws-path', transport.path ?? '/');
+    const host = transport.headers?.Host;
+    if (host) appendSurgeParameter(parameters, 'ws-headers', `Host:${host}`);
+  } else if (transport?.type === 'httpupgrade') {
+    parameters.push('ws=true', 'ws-http-upgrade=true');
+    appendSurgeParameter(parameters, 'ws-path', transport.path ?? '/');
+    if (transport.host) appendSurgeParameter(parameters, 'ws-headers', `Host:${transport.host}`);
+  } else if (transport?.type === 'grpc') {
+    parameters.push('grpc=true');
+    appendSurgeParameter(parameters, 'grpc-service-name', transport.service_name ?? 'grpc');
+    appendSurgeParameter(parameters, 'grpc-authority', transport.authority);
+    if (transport.mode === 'multi') parameters.push('grpc-mode=multi');
+  } else if (transport?.type === 'xhttp') {
+    if (transport.extra) {
+      throw new Error('XHTTP extra 参数暂未支持原生 Surge 转换，请先去掉 extra 或继续使用 External。');
+    }
+    parameters.push('xhttp=true');
+    appendSurgeParameter(parameters, 'xhttp-path', transport.path ?? '/');
+    appendSurgeParameter(parameters, 'xhttp-host', transport.host);
+    appendSurgeParameter(parameters, 'xhttp-mode', transport.mode);
+  }
+
+  if (config.tcpFastOpen) parameters.push('tfo=true');
+  parameters.push('ip-version=prefer-v4');
+  return parameters.join(', ');
+};
+
+const removeNativeManagedFiles = async (config: CliConfig) => {
+  const entries = await readdir(config.outputDir).catch(() => []);
+  const managed = entries.filter((entry) => MANAGED_CONFIG_PATTERN.test(entry) || entry === MANIFEST_FILE_NAME);
+  await Promise.all(managed.map((entry) => rm(join(config.outputDir, entry), { force: true })));
+  await Promise.all([
+    rm(stablePortFile(config.outputDir, 'external'), { force: true }),
+    rm(stablePortFile(config.outputDir, 'mihomo'), { force: true }),
+  ]);
+};
+
+export const syncNativeSurgeToSurge = async (config: CliConfig, { dryRun = false }: { dryRun?: boolean } = {}) => {
+  ensureRequiredConfig(config);
+  await ensureSurgeNativePaths(config);
+  await ensureWritableDirs(config);
+
+  const vlessNodes = await collectVlessNodes(config);
+  const { outbounds, unnamed } = parseSyncVlessNodes(vlessNodes);
+  const names = stablePolicyNames(outbounds, [], unnamed);
+  const proxyLines = outbounds.map((outbound, index) =>
+    buildNativeVlessProxyLine({ nodeName: names[index]!, outbound, config }),
+  );
+  const surgeProfile = await buildSurgeProfile({ config, proxyLines, nodeNames: names });
+  await validateSurgeProfile(surgeProfile.updated, config.surgeConfigPath);
+  const previousNativeBlock = surgeProfile.source.match(/# vless start([\s\S]*?)# vless end/)?.[1] ?? '';
+  const previousNativeNames = previousNativeBlock
+    .split('\n')
+    .map((line) => line.match(/^\s*(.*?)\s*=\s*vless\s*,/i)?.[1]?.trim())
+    .filter((name): name is string => Boolean(name));
+  const previousNativeNameSet = new Set(previousNativeNames);
+  const nextNativeNameSet = new Set(names);
+
+  if (dryRun) {
+    const source = surgeProfile.source;
+    return {
+      dryRun: true as const,
+      backupPath: undefined,
+      count: names.length,
+      preview: {
+        count: names.length,
+        added: names.filter((name) => !previousNativeNameSet.has(name)).length,
+        removed: previousNativeNames.filter((name) => !nextNativeNameSet.has(name)).length,
+        profileChanged: source !== surgeProfile.updated,
+        policyGroupName: config.policyGroupName,
+        policyGroupTargets: configuredPolicyGroupTargets(config),
+        policyGroupExclusions: configuredPolicyGroupExclusions(config),
+        policyGroupTargetModes: configuredPolicyGroupTargetModes(config),
+        policyGroupChanges: surgeProfile.policyGroupChanges,
+        udpRelay: config.udpRelay,
+        udpTestEnabled: false,
+        udpTestTarget: config.udpTestTarget,
+        tcpFastOpen: config.tcpFastOpen,
+        connectTimeoutEnabled: false,
+        connectTimeoutSeconds: config.connectTimeoutSeconds,
+        surgeConfigPath: config.surgeConfigPath,
+        outputDir: config.outputDir,
+        runtimeMode: 'surge-native' as const,
+        engineLabel: 'Surge 原生 VLESS',
+        proxyFormat: '原生 VLESS',
+        validationSummary: 'Surge 原生 VLESS 配置已通过校验',
+        nodes: names.map((name, index) => ({ name, server: outbounds[index]!.server, port: outbounds[index]!.server_port })),
+      },
+    };
+  }
+
+  const backupPath = await backupSurgeProfile(config);
+  await writeTextFile(config.surgeConfigPath, surgeProfile.updated);
+  await removeNativeManagedFiles(config);
+  if (config.subscriptionOutputPath) await writeTextFile(config.subscriptionOutputPath, `${vlessNodes.join('\n')}\n`);
+  await maybeReloadSurge(config, surgeProfile.updated);
+  return { dryRun: false as const, backupPath, count: names.length };
+};
+
 const reportDryRun = async ({
   config,
   generated,
@@ -1609,6 +1904,22 @@ export const runExternalDoctor = async (config: CliConfig) => {
     });
   }
 
+  return reportDoctorChecks(checks);
+};
+
+export const runNativeDoctor = async (config: CliConfig) => {
+  const checks = await runCommonDoctorChecks(config);
+  const profileExists = Boolean(config.surgeConfigPath) && (await pathExists(config.surgeConfigPath));
+  const profile = profileExists ? await readTextFile(config.surgeConfigPath) : '';
+  const managedBlock = profile.match(/# vless start([\s\S]*?)# vless end/);
+  const nodeCount = managedBlock?.[1]?.split('\n').filter((line) => /^\s*[^#].*=\s*vless\s*,/i.test(line)).length ?? 0;
+  checks.splice(Math.min(2, checks.length), 0, {
+    label: 'surge-native',
+    level: profileExists ? 'ok' : 'fail',
+    detail: profileExists
+      ? `${nodeCount} native VLESS policies in ${config.surgeConfigPath}`
+      : 'Surge profile not found',
+  });
   return reportDoctorChecks(checks);
 };
 

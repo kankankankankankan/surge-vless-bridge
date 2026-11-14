@@ -28,6 +28,7 @@ const labelMap = {
   'surge-http-api': 'Surge 重载',
   'auto-reload': 'Surge 重载',
   ports: '本地端口',
+  'surge-native': 'Surge 原生 VLESS',
 };
 
 const actionMap = {
@@ -53,6 +54,7 @@ const actionMap = {
 let state;
 let activeView = 'overview';
 let busy = false;
+let busyText = '';
 let selectedHistoryId;
 let toastTimer;
 let previewPlan;
@@ -75,6 +77,17 @@ let setupWizardOpen = false;
 let setupWizardInitialized = false;
 let setupWizardStep = 1;
 let setupWizardError = '';
+let windowLocked = false;
+let lockedScrollTop = 0;
+let focusBeforeWindowLock;
+let mihomoCustomDnsServers = [];
+let mihomoCustomDohEndpoint = '';
+let mihomoCustomDotEndpoint = '';
+let lastMihomoDnsPreset = 'inherit';
+let externalCustomDnsServers = [];
+let externalCustomDohEndpoint = '';
+let externalCustomDotEndpoint = '';
+let lastExternalResolverPreset = 'cloudflare-doh';
 let wizardSourceDraft = { subscriptionUrls: [], subscriptionNames: [], subscriptionOptions: [], vlessNodes: [] };
 const installProgressByTarget = new Map();
 let installIndicatorTimer;
@@ -111,14 +124,79 @@ const showToast = (message, isError = false) => {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3600);
 };
 
-const setBusy = (value, text = '正在处理', showCover = true) => {
+const keepLockedScrollPosition = () => {
+  if (windowLocked) $('.main-content').scrollTop = lockedScrollTop;
+};
+
+const preventLockedScroll = (event) => {
+  if (!windowLocked) return;
+  if (event.type !== 'keydown' || ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
+    event.preventDefault();
+  }
+};
+
+const setWindowLock = (value) => {
+  if (value === windowLocked) return;
+  const shell = $('.app-shell');
+  const main = $('.main-content');
+  const cover = $('#loading-cover');
+  windowLocked = value;
+  if (value) {
+    lockedScrollTop = main.scrollTop;
+    focusBeforeWindowLock = document.activeElement;
+    document.documentElement.classList.add('is-window-locked');
+    shell.inert = true;
+    cover.classList.add('window-lock');
+    cover.style.inset = '0px';
+    cover.getBoundingClientRect();
+    cover.setAttribute('role', 'dialog');
+    cover.setAttribute('aria-modal', 'true');
+    document.addEventListener('wheel', preventLockedScroll, { passive: false, capture: true });
+    document.addEventListener('touchmove', preventLockedScroll, { passive: false, capture: true });
+    document.addEventListener('keydown', preventLockedScroll, true);
+    main.addEventListener('scroll', keepLockedScrollPosition);
+    main.scrollTop = lockedScrollTop;
+    cover.focus({ preventScroll: true });
+    return;
+  }
+  document.removeEventListener('wheel', preventLockedScroll, true);
+  document.removeEventListener('touchmove', preventLockedScroll, true);
+  document.removeEventListener('keydown', preventLockedScroll, true);
+  main.removeEventListener('scroll', keepLockedScrollPosition);
+  document.documentElement.classList.remove('is-window-locked');
+  shell.inert = false;
+  cover.classList.remove('window-lock');
+  cover.style.removeProperty('inset');
+  cover.setAttribute('role', 'status');
+  cover.setAttribute('aria-modal', 'false');
+  main.scrollTop = lockedScrollTop;
+  if (focusBeforeWindowLock?.isConnected && !focusBeforeWindowLock.disabled) {
+    focusBeforeWindowLock.focus({ preventScroll: true });
+  }
+  focusBeforeWindowLock = undefined;
+};
+
+const renderSidebarStatus = () => {
+  const failures = state?.doctor.failures ?? 0;
+  const warnings = state?.doctor.warnings ?? 0;
+  $('#sidebar-dot').className = `state-dot ${busy ? '' : failures ? 'fail' : warnings ? 'warn' : 'ok'}`;
+  $('#sidebar-status').textContent = busy ? busyText : failures ? `${failures} 项需处理` : warnings ? `${warnings} 项提醒` : '运行正常';
+  $('.sidebar-state').title = $('#sidebar-status').textContent;
+  $('#refresh-state').classList.toggle('is-loading', busy);
+  $('#refresh-state').setAttribute('aria-busy', String(busy));
+};
+
+const setBusy = (value, text = '正在处理', showCover = true, lockWindow = false) => {
   busy = value;
+  busyText = value ? text : '';
+  renderSidebarStatus();
   const cover = $('#loading-cover');
   cover.classList.remove('failed');
   cover.querySelector('.spinner').classList.remove('hidden');
   $('#reload-app').classList.add('hidden');
   cover.querySelector('span').textContent = text;
   cover.classList.toggle('hidden', !value || !showCover);
+  setWindowLock(value && lockWindow);
   $$('button').forEach((button) => {
     if (!button.classList.contains('nav-item') && button.id !== 'install-task-indicator') button.disabled = value;
   });
@@ -147,6 +225,8 @@ const withTimeout = (promise, timeoutMs, message) =>
 
 const showStartupError = (message) => {
   busy = false;
+  busyText = '';
+  renderSidebarStatus();
   const cover = $('#loading-cover');
   cover.classList.remove('hidden');
   cover.classList.add('failed');
@@ -167,6 +247,7 @@ const installPhaseLabels = {
   installing: '安装',
   validating: '验证',
 };
+const MIN_STARTUP_COVER_MS = 240;
 
 const formatBytes = (value) => {
   if (!Number.isFinite(value) || value < 0) return '';
@@ -256,7 +337,7 @@ const switchView = (view) => {
   $$('.view').forEach((item) => item.classList.toggle('active', item.id === `view-${view}`));
   $('#page-title').textContent = pageMeta[view][0];
   $('#page-subtitle').textContent = pageMeta[view][1];
-  $('.main-content').scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  $('.main-content').scrollTop = 0;
 };
 
 const checkByLabel = (label) => state.doctor.checks.find((check) => check.label === label);
@@ -339,6 +420,7 @@ const renderDiagnostics = () => {
 
 const renderTrafficFlow = () => {
   const mihomo = state.config.runtimeMode === 'mihomo';
+  const native = state.config.runtimeMode === 'surge-native';
   const service = state.environment.mihomoService;
   const backend = $('#traffic-flow-backend');
   const status = $('#traffic-flow-status');
@@ -346,8 +428,8 @@ const renderTrafficFlow = () => {
   const note = $('#traffic-flow-note');
   if (!backend || !status || !subtitle || !note) return;
   backend.classList.toggle('mihomo', mihomo);
-  backend.querySelector('strong').textContent = mihomo ? 'Mihomo' : 'sing-box External';
-  backend.querySelector('small').textContent = mihomo ? '单进程 + 本机 listeners' : '按节点启动 External';
+  backend.querySelector('strong').textContent = mihomo ? 'Mihomo' : native ? 'Surge 原生 VLESS' : 'sing-box External';
+  backend.querySelector('small').textContent = mihomo ? '单进程 + 本机 listeners' : native ? 'Surge 原生节点' : '按节点启动 External';
   if (mihomo) {
     const listenerCount = state.diagnosticNodes?.length || state.nodeCount;
     const ready = Boolean(service.controllerReady && service.serviceMatchesConfig);
@@ -357,6 +439,11 @@ const renderTrafficFlow = () => {
     note.textContent = ready
       ? `Mihomo 当前承载 ${listenerCount} 个本机 listener。系统中看到的 Mihomo 流量属于桥接后端出站，不是额外的一份客户端请求。`
       : 'Mihomo 尚未确认服务归属或 Controller 状态，先在环境检查中修复后再判断节点流量。';
+  } else if (native) {
+    status.textContent = '原生运行';
+    status.className = 'flow-status ready';
+    subtitle.textContent = 'Surge 直接承载 VLESS 节点，不启动外部内核进程。';
+    note.textContent = '原生模式依赖 Surge Mac 6.12.0 或更高版本，节点参数直接写入 [Proxy]。';
   } else {
     status.textContent = '按需启动';
     status.className = 'flow-status';
@@ -370,8 +457,10 @@ const renderOverview = () => {
   renderTrafficFlow();
   const runtimeModeConfirmed = state.runtimeModeConfirmed;
   const sourceReady = checkByLabel('nodeSources')?.level === 'ok';
+  const native = state.config.runtimeMode === 'surge-native';
   const binaryLabel = state.config.runtimeMode === 'mihomo' ? 'mihomoBinary' : 'singBoxBinary';
   const environmentChecks = ['surgeConfigPath', binaryLabel, 'proxy-group-section', 'proxy-section', 'rule-section'];
+  if (native) environmentChecks.splice(1, 1);
   if (state.config.runtimeMode === 'mihomo') {
     environmentChecks.push('mihomo-config', 'mihomo-launch-agent', 'mihomo-controller', 'mihomo-listeners');
   }
@@ -402,7 +491,7 @@ const renderOverview = () => {
   setWorkflowState(
     'environment',
     environmentReady ? 'done' : sourceReady ? 'current' : 'blocked',
-    environmentReady ? `Surge 与 ${state.config.runtimeMode === 'mihomo' ? 'Mihomo' : 'sing-box'} 已就绪` : `${state.doctor.failures} 项需要处理`,
+    environmentReady ? `Surge 与 ${native ? '原生 VLESS' : state.config.runtimeMode === 'mihomo' ? 'Mihomo' : 'sing-box'} 已就绪` : `${state.doctor.failures} 项需要处理`,
   );
   setWorkflowState(
     'preview',
@@ -411,14 +500,14 @@ const renderOverview = () => {
   );
 
   const activeDependency = state.config.runtimeMode === 'mihomo' ? state.environment.mihomo : state.environment.singBox;
-  $('#engine-summary-name').textContent = `${state.config.runtimeMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}${runtimeModeConfirmed ? '' : '（待确认）'}`;
-  $('#engine-summary-version').textContent = activeDependency.currentVersion ? `v${activeDependency.currentVersion}` : '未识别';
+  $('#engine-summary-name').textContent = `${native ? 'Surge 原生 VLESS' : state.config.runtimeMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}${runtimeModeConfirmed ? '' : '（待确认）'}`;
+  $('#engine-summary-version').textContent = native ? 'Surge 6.12.0+' : activeDependency.currentVersion ? `v${activeDependency.currentVersion}` : '未识别';
   $('#engine-summary-service').textContent =
     state.config.runtimeMode === 'mihomo'
       ? state.environment.mihomoService.controllerReady
         ? '后台运行中'
         : '未连接'
-      : '由 Surge 按需启动';
+      : native ? '由 Surge 原生承载' : '由 Surge 按需启动';
   $('#engine-summary-nodes').textContent = `${state.nodeCount} 个节点${state.config.runtimeMode === 'mihomo' ? `，${state.nodeCount} 个 listener` : ''}`;
   setWorkflowState(
     'sync',
@@ -440,7 +529,7 @@ const renderOverview = () => {
   if (!runtimeModeConfirmed) {
     nextAction = 'engine';
     $('#next-action-title').textContent = '确认运行引擎';
-    $('#next-action-detail').textContent = '先选择 External 或 Mihomo，确认后进入节点和路径配置。';
+    $('#next-action-detail').textContent = '先选择一种运行方式，确认后进入节点和路径配置。';
     $('#next-action-button span').textContent = '前往选择';
   } else if (!sourceReady) {
     nextAction = 'sources';
@@ -474,10 +563,7 @@ const renderOverview = () => {
     $('#next-action-button span').textContent = '预览更新';
   }
 
-  const overall = state.doctor.failures > 0 ? 'fail' : state.doctor.warnings > 0 ? 'warn' : 'ok';
-  $('#sidebar-dot').className = `state-dot ${overall}`;
-  $('#sidebar-status').textContent = state.doctor.failures > 0 ? `${state.doctor.failures} 项需处理` : state.doctor.warnings > 0 ? `${state.doctor.warnings} 项提醒` : '运行正常';
-  $('.sidebar-state').title = $('#sidebar-status').textContent;
+  renderSidebarStatus();
   $('#doctor-summary').textContent = state.doctor.failures > 0 ? `${state.doctor.failures} 项问题` : state.doctor.warnings > 0 ? `${state.doctor.warnings} 项提醒` : '全部通过';
 
   $('#doctor-list').innerHTML = state.doctor.checks
@@ -570,7 +656,11 @@ const initializeSetupWizard = () => {
 };
 
 const selectedWizardDependency = () =>
-  onboardingDraftMode === 'mihomo' ? state.environment.mihomo : state.environment.singBox;
+  onboardingDraftMode === 'mihomo'
+    ? state.environment.mihomo
+    : onboardingDraftMode === 'surge-native'
+      ? { installed: true, currentVersion: '6.12.0+' }
+      : state.environment.singBox;
 
 const setupWizardStatus = () => {
   if (setupWizardError) return setupWizardError;
@@ -587,7 +677,11 @@ const setupWizardStatus = () => {
 const renderSetupReview = () => {
   const sources = wizardSourcesPayload();
   const settings = wizardSettingsPayload();
-  const engine = onboardingDraftMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External';
+  const engine = onboardingDraftMode === 'mihomo'
+    ? 'Mihomo 网关'
+    : onboardingDraftMode === 'surge-native'
+      ? 'Surge 原生 VLESS'
+      : 'sing-box External';
   const sourceSummary = `${sources.subscriptionUrls.length} 个订阅，${sources.vlessNodes.length} 个直接节点`;
   const options = [
     settings.autoReload ? '自动重载' : '手动重载',
@@ -639,10 +733,12 @@ const renderEngineOnboarding = () => {
   });
   const externalSelected = selectedMode === 'external';
   const mihomoSelected = selectedMode === 'mihomo';
+  const nativeSelected = selectedMode === 'surge-native';
   const singBoxInstalled = state.environment.singBox.installed;
   const mihomoInstalled = state.environment.mihomo.installed;
   $('#onboarding-external-actions').classList.toggle('hidden', !externalSelected);
   $('#onboarding-mihomo-actions').classList.toggle('hidden', !mihomoSelected);
+  $('#onboarding-native-actions')?.classList.toggle('hidden', !nativeSelected);
   $('#onboarding-external-status').textContent = singBoxInstalled
     ? `已检测到 ${state.environment.singBox.currentVersion ? `sing-box v${state.environment.singBox.currentVersion}` : 'sing-box 可执行文件'}`
     : '尚未检测到 sing-box，可安装或选择已有文件。';
@@ -950,13 +1046,32 @@ const renderSettings = () => {
   $('#mihomo-controller-port').value = String(config.mihomoControllerPort);
   $('#mihomo-auto-start').checked = config.mihomoAutoStart;
   $('#mihomo-log-level').value = config.mihomoLogLevel;
+  $('#doh-endpoint').value = config.addressResolverDohEndpoint;
+  $('#dns-servers').value = config.addressResolverDnsServers.join('\n');
+  const externalResolverPreset = externalResolverPresetFromConfig(config);
+  $('#resolver-preset').value = externalResolverPreset;
+  if (externalResolverPreset === 'custom-dns') externalCustomDnsServers = [...config.addressResolverDnsServers];
+  if (externalResolverPreset === 'custom-doh') externalCustomDohEndpoint = config.addressResolverDohEndpoint;
+  if (externalResolverPreset === 'custom-dot') externalCustomDotEndpoint = config.addressResolverDohEndpoint;
+  lastExternalResolverPreset = externalResolverPreset;
+  $('#mihomo-dns-servers').value = config.mihomoDnsServers.join('\n');
+  $('#mihomo-doh-endpoint').value = config.mihomoDohEndpoint;
+  $('#mihomo-dns-ipv6').checked = config.mihomoDnsIpv6;
+  $('#mihomo-tcp-concurrent').checked = config.mihomoTcpConcurrent;
+  const mihomoDnsPreset = mihomoDnsPresetFromConfig(config);
+  $('#mihomo-dns-preset').value = mihomoDnsPreset;
+  if (mihomoDnsPreset === 'custom-dns') {
+    mihomoCustomDnsServers = [...config.mihomoDnsServers];
+  } else if (mihomoCustomDnsServers.length === 0) {
+    mihomoCustomDnsServers = [...config.addressResolverDnsServers];
+  }
+  if (mihomoDnsPreset === 'custom-doh') mihomoCustomDohEndpoint = config.mihomoDohEndpoint;
+  if (mihomoDnsPreset === 'custom-dot') mihomoCustomDotEndpoint = config.mihomoDohEndpoint;
+  lastMihomoDnsPreset = mihomoDnsPreset;
   $('#policy-group-name').value = config.policyGroupName;
   renderPolicyGroups(config);
   $('#port-start').value = String(config.portStart);
   $('#backup-keep').value = String(config.backupKeep);
-  $('#resolver-strategy').value = config.addressResolverStrategy;
-  $('#doh-endpoint').value = config.addressResolverDohEndpoint;
-  $('#dns-servers').value = config.addressResolverDnsServers.join('\n');
   $('#filter-surge-fake-ip').checked = config.addressResolverFilterSurgeFakeIp;
   $('#auto-reload').checked = config.autoReload;
   $('#udp-relay').checked = config.udpRelay;
@@ -972,6 +1087,7 @@ const renderSettings = () => {
   renderMihomoDependency();
   updateEngineFields();
   updateResolverFields();
+  updateMihomoDnsFields();
   updateConnectionOptionFields();
 };
 
@@ -991,15 +1107,23 @@ const updateEngineFields = () => {
   const switchButton = $('#confirm-engine-switch');
   switchButton.classList.toggle('hidden', !changed);
   switchButton.disabled = busy || (engineDraftMode === 'mihomo' && !state.environment.mihomo.installed);
-  switchButton.querySelector('span').textContent = engineDraftMode === 'mihomo' ? '确认切换到 Mihomo' : '确认切换到 External';
+  switchButton.querySelector('span').textContent = engineDraftMode === 'mihomo'
+    ? '确认切换到 Mihomo'
+    : engineDraftMode === 'surge-native'
+      ? '确认切换到原生 VLESS'
+      : '确认切换到 External';
   $('#engine-change-summary').textContent = changed
     ? engineDraftMode === 'mihomo'
       ? state.environment.mihomo.installed
         ? '确认后会先保存当前设置，校验 Mihomo 配置，启动后台服务，再将 Surge 节点切换为 SOCKS5。失败时保留 External。'
         : '请先在下方安装或选择 Mihomo，然后确认切换。'
-      : '确认后会先保存当前设置，恢复 External 节点，再停止 Mihomo 后台服务。失败时恢复 Mihomo 服务。'
+      : engineDraftMode === 'surge-native'
+        ? '确认后会直接把节点转换为 Surge 原生 VLESS，停止已托管的后台内核，并保留当前 Surge 备份。要求 Surge Mac 6.12.0 或更高。'
+        : '确认后会先保存当前设置，恢复 External 节点，再停止 Mihomo 后台服务。失败时恢复 Mihomo 服务。'
     : engineDraftMode === 'mihomo'
       ? 'Surge 连接每个本地 SOCKS5 listener，Mihomo 在后台承载全部 VLESS 节点。'
+      : engineDraftMode === 'surge-native'
+        ? 'Surge 直接承载 VLESS 节点，不需要安装或运行外部内核。'
       : 'Surge 为每个节点按需启动独立 sing-box External 进程。';
 };
 
@@ -1145,6 +1269,7 @@ const renderAll = () => {
 
 const loadState = async (showCover = true) => {
   const previousEngineDraftMode = engineDraftMode;
+  const coverStartedAt = showCover ? performance.now() : 0;
   let loaded = false;
   if (showCover) setBusy(true, '正在读取配置');
   try {
@@ -1171,14 +1296,20 @@ const loadState = async (showCover = true) => {
     if (state.runtimeModeConfirmed) {
       if (state.config.runtimeMode === 'mihomo') {
         if (!mihomoUpdateChecked) void refreshMihomoStatus(false);
-      } else if (!singBoxUpdateChecked) void refreshSingBoxStatus(false);
+      } else if (state.config.runtimeMode === 'external' && !singBoxUpdateChecked) void refreshSingBoxStatus(false);
     }
   } catch (error) {
     const message = error.message || String(error);
     showToast(message, true);
     if (showCover) showStartupError(message);
   } finally {
-    if (showCover && loaded) setBusy(false);
+    $('#loading-cover').dataset.startupPending = 'false';
+    if (showCover && loaded) {
+      // Keep the startup feedback visible long enough to be perceived on fast local reads.
+      const remaining = MIN_STARTUP_COVER_MS - (performance.now() - coverStartedAt);
+      if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+      setBusy(false);
+    }
   }
 };
 
@@ -1286,17 +1417,156 @@ const updateScheduleFields = () => {
   });
 };
 
+const DNS_PRESETS = {
+  'cloudflare-doh': { mode: 'doh', endpoint: 'https://1.1.1.1/dns-query' },
+  'google-doh': { mode: 'doh', endpoint: 'https://dns.google/dns-query' },
+  'quad9-doh': { mode: 'doh', endpoint: 'https://dns.quad9.net/dns-query' },
+  'alidns-doh': { mode: 'doh', endpoint: 'https://dns.alidns.com/dns-query' },
+  'alidns-dot': { mode: 'dot', endpoint: 'tls://dns.alidns.com:853' },
+  'dnspod-doh': { mode: 'doh', endpoint: 'https://doh.pub/dns-query' },
+  'dnspod-dot': { mode: 'dot', endpoint: 'tls://dot.pub:853' },
+  'cloudflare-dns': { mode: 'dns', servers: ['1.1.1.1', '1.0.0.1'] },
+  'google-dns': { mode: 'dns', servers: ['8.8.8.8', '8.8.4.4'] },
+  'quad9-dns': { mode: 'dns', servers: ['9.9.9.9', '149.112.112.112'] },
+};
+
+const sameValues = (left, right) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const configuredDnsPreset = ({ mode, endpoint, servers }) => {
+  const match = Object.entries(DNS_PRESETS).find(([, preset]) =>
+    preset.mode === mode &&
+    (preset.endpoint ? preset.endpoint === endpoint : sameValues(preset.servers, servers)),
+  );
+  return match?.[0] ?? (mode === 'dot' ? 'custom-dot' : mode === 'doh' ? 'custom-doh' : 'custom-dns');
+};
+
+const dnsModeFromPreset = (preset) => {
+  if (preset === 'custom-dns') return 'dns';
+  if (preset === 'custom-dot' || preset.endsWith('-dot')) return 'dot';
+  return DNS_PRESETS[preset]?.mode ?? 'doh';
+};
+
+const externalResolverPresetFromConfig = (config) => {
+  if (config.addressResolverStrategy === 'system' || config.addressResolverStrategy === 'off') {
+    return config.addressResolverStrategy;
+  }
+  return configuredDnsPreset({
+    mode: config.addressResolverStrategy,
+    endpoint: config.addressResolverDohEndpoint,
+    servers: config.addressResolverDnsServers,
+  });
+};
+
+const externalResolverStrategyFromPreset = () => {
+  const preset = $('#resolver-preset').value;
+  return preset === 'system' || preset === 'off' ? preset : dnsModeFromPreset(preset);
+};
+
+const mihomoDnsPresetFromConfig = (config) => {
+  if (config.mihomoDnsMode === 'inherit' || config.mihomoDnsMode === 'system') return config.mihomoDnsMode;
+  return configuredDnsPreset({
+    mode: config.mihomoDnsMode,
+    endpoint: config.mihomoDohEndpoint,
+    servers: config.mihomoDnsServers,
+  });
+};
+
+const mihomoDnsModeFromPreset = () => {
+  const preset = $('#mihomo-dns-preset').value;
+  if (preset === 'inherit' || preset === 'system') return preset;
+  return dnsModeFromPreset(preset);
+};
+
+const updateEncryptedDnsField = (prefix, mode) => {
+  const dot = mode === 'dot';
+  $(`#${prefix}-encrypted-dns-label`).textContent = dot ? 'DoT 地址' : 'DoH 地址';
+  $(`#${prefix}-encrypted-dns-help`).textContent = dot
+    ? '使用 tls:// 地址，默认端口为 853，并验证服务端证书。'
+    : '使用 HTTPS DoH 地址，并验证服务端证书。';
+};
+
 const updateResolverFields = () => {
-  const strategy = $('#resolver-strategy').value;
+  const preset = $('#resolver-preset').value;
+  const strategy = externalResolverStrategyFromPreset();
   const descriptions = {
-    doh: '同步时通过填写的 HTTPS 端点解析节点服务器域名。失败后继续尝试指定 DNS 和系统 DNS。',
-    dns: '同步时向填写的 DNS 服务器解析节点服务器域名。失败后继续尝试 DoH 和系统 DNS。',
+    doh: preset === 'custom-doh'
+      ? '填写 HTTPS DoH 端点。解析失败后继续尝试指定 DNS 和系统 DNS。'
+      : '已填入所选服务的 DoH 端点；仍可手动修改。',
+    dot: preset === 'custom-dot'
+      ? '填写 tls:// DoT 端点。解析失败后继续尝试指定 DNS 和系统 DNS。'
+      : '已填入所选服务的 DoT 端点；仍可手动修改。',
+    dns: preset === 'custom-dns'
+      ? '填写内网抗污染 DNS 或其他解析器，每行一个地址。'
+      : '已填入所选服务的 DNS 地址；仍可手动修改。',
     system: '同步时使用 macOS 当前 DNS 解析节点服务器域名。',
     off: '同步时不解析节点服务器域名，Surge external 节点不写入 addresses 参数。',
   };
   $('#resolver-help').textContent = descriptions[strategy];
-  $('#doh-endpoint-field').classList.toggle('hidden', strategy !== 'doh');
+  $('#doh-endpoint-field').classList.toggle('hidden', strategy !== 'doh' && strategy !== 'dot');
   $('#dns-servers-field').classList.toggle('hidden', strategy !== 'dns');
+  if (strategy === 'doh' || strategy === 'dot') updateEncryptedDnsField('external', strategy);
+  updateMihomoDnsFields();
+};
+
+const updateMihomoDnsFields = () => {
+  const preset = $('#mihomo-dns-preset').value;
+  const mode = mihomoDnsModeFromPreset();
+  const inheritedStrategy = externalResolverStrategyFromPreset();
+  const inheritedDescriptions = {
+    doh: `当前跟随 DoH：${$('#doh-endpoint').value.trim() || '未填写'}`,
+    dot: `当前跟随 DoT：${$('#doh-endpoint').value.trim() || '未填写'}`,
+    dns: `当前跟随指定 DNS：${dnsServersFromInput().join('、') || '未填写'}`,
+    system: '当前跟随 macOS 系统 DNS。Surge 增强模式下可能得到 Fake IP。',
+    off: '节点地址解析已关闭，将回退到 macOS 系统 DNS。Surge 增强模式下可能得到 Fake IP。',
+  };
+  const modeDescriptions = {
+    inherit: inheritedDescriptions[inheritedStrategy],
+    dns: preset === 'custom-dns'
+      ? '填写内网抗污染 DNS 或其他解析器，每行一个地址。'
+      : '已填入所选服务的官方 DNS 地址；可以继续手动修改。',
+    doh: preset === 'custom-doh'
+      ? '填写其他服务的 HTTPS DoH 端点。'
+      : '已填入所选服务的官方 DoH 端点；可以继续手动修改。',
+    dot: preset === 'custom-dot'
+      ? '填写其他服务的 tls:// DoT 端点。'
+      : '已填入所选服务的官方 DoT 端点；可以继续手动修改。',
+    system: '使用 macOS 系统 DNS。Surge 增强模式下可能得到 Fake IP，通常不建议。',
+  };
+  $('#mihomo-dns-help').textContent = modeDescriptions[mode];
+  $('#mihomo-dns-servers-field').classList.toggle('hidden', mode !== 'dns');
+  $('#mihomo-doh-endpoint-field').classList.toggle('hidden', mode !== 'doh' && mode !== 'dot');
+  if (mode === 'doh' || mode === 'dot') updateEncryptedDnsField('mihomo', mode);
+};
+
+const applyMihomoDnsPreset = () => {
+  const selectedPreset = $('#mihomo-dns-preset').value;
+  if (lastMihomoDnsPreset === 'custom-dns') mihomoCustomDnsServers = mihomoDnsServersFromInput();
+  if (lastMihomoDnsPreset === 'custom-doh') mihomoCustomDohEndpoint = $('#mihomo-doh-endpoint').value.trim();
+  if (lastMihomoDnsPreset === 'custom-dot') mihomoCustomDotEndpoint = $('#mihomo-doh-endpoint').value.trim();
+  const preset = DNS_PRESETS[selectedPreset];
+  if (preset?.endpoint) $('#mihomo-doh-endpoint').value = preset.endpoint;
+  if (preset?.servers) $('#mihomo-dns-servers').value = preset.servers.join('\n');
+  if (selectedPreset === 'custom-dns') $('#mihomo-dns-servers').value = mihomoCustomDnsServers.join('\n');
+  if (selectedPreset === 'custom-doh') $('#mihomo-doh-endpoint').value = mihomoCustomDohEndpoint;
+  if (selectedPreset === 'custom-dot') $('#mihomo-doh-endpoint').value = mihomoCustomDotEndpoint;
+  lastMihomoDnsPreset = selectedPreset;
+  updateMihomoDnsFields();
+};
+
+const applyExternalResolverPreset = () => {
+  const selectedPreset = $('#resolver-preset').value;
+  if (lastExternalResolverPreset === 'custom-dns') externalCustomDnsServers = dnsServersFromInput();
+  if (lastExternalResolverPreset === 'custom-doh') externalCustomDohEndpoint = $('#doh-endpoint').value.trim();
+  if (lastExternalResolverPreset === 'custom-dot') externalCustomDotEndpoint = $('#doh-endpoint').value.trim();
+  const preset = DNS_PRESETS[selectedPreset];
+  if (preset?.endpoint) $('#doh-endpoint').value = preset.endpoint;
+  if (preset?.servers) $('#dns-servers').value = preset.servers.join('\n');
+  if (selectedPreset === 'custom-dns') $('#dns-servers').value = externalCustomDnsServers.join('\n');
+  if (selectedPreset === 'custom-doh') $('#doh-endpoint').value = externalCustomDohEndpoint;
+  if (selectedPreset === 'custom-dot') $('#doh-endpoint').value = externalCustomDotEndpoint;
+  lastExternalResolverPreset = selectedPreset;
+  updateResolverFields();
 };
 
 const dnsServersFromInput = () =>
@@ -1304,6 +1574,36 @@ const dnsServersFromInput = () =>
     .value.split(/[\s,]+/)
     .map((value) => value.trim())
     .filter(Boolean);
+
+const mihomoDnsServersFromInput = () =>
+  $('#mihomo-dns-servers')
+    .value.split(/[\s,]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+const markMihomoDnsAsCustom = (mode) => {
+  const customPreset = mode === 'dot' ? 'custom-dot' : mode === 'doh' ? 'custom-doh' : 'custom-dns';
+  if ($('#mihomo-dns-preset').value !== customPreset) {
+    $('#mihomo-dns-preset').value = customPreset;
+    lastMihomoDnsPreset = customPreset;
+  }
+  if (mode === 'doh') mihomoCustomDohEndpoint = $('#mihomo-doh-endpoint').value.trim();
+  else if (mode === 'dot') mihomoCustomDotEndpoint = $('#mihomo-doh-endpoint').value.trim();
+  else mihomoCustomDnsServers = mihomoDnsServersFromInput();
+  updateMihomoDnsFields();
+};
+
+const markExternalResolverAsCustom = (mode) => {
+  const customPreset = mode === 'dot' ? 'custom-dot' : mode === 'doh' ? 'custom-doh' : 'custom-dns';
+  if ($('#resolver-preset').value !== customPreset) {
+    $('#resolver-preset').value = customPreset;
+    lastExternalResolverPreset = customPreset;
+  }
+  if (mode === 'doh') externalCustomDohEndpoint = $('#doh-endpoint').value.trim();
+  else if (mode === 'dot') externalCustomDotEndpoint = $('#doh-endpoint').value.trim();
+  else externalCustomDnsServers = dnsServersFromInput();
+  updateResolverFields();
+};
 
 const runRepair = async (check) => {
   if (check === 'proxy-group-section' || check === 'proxy-section' || check === 'rule-section') {
@@ -1556,7 +1856,12 @@ $('#schedule-interval-preset').addEventListener('change', updateScheduleFields);
 $('#schedule-interval-custom').addEventListener('input', updateScheduleFields);
 $('#schedule-hour').addEventListener('input', updateScheduleFields);
 $('#schedule-minute').addEventListener('input', updateScheduleFields);
-$('#resolver-strategy').addEventListener('change', updateResolverFields);
+$('#resolver-preset').addEventListener('change', applyExternalResolverPreset);
+$('#mihomo-dns-preset').addEventListener('change', applyMihomoDnsPreset);
+$('#mihomo-doh-endpoint').addEventListener('input', () => markMihomoDnsAsCustom(mihomoDnsModeFromPreset()));
+$('#mihomo-dns-servers').addEventListener('input', () => markMihomoDnsAsCustom('dns'));
+$('#doh-endpoint').addEventListener('input', () => markExternalResolverAsCustom(externalResolverStrategyFromPreset()));
+$('#dns-servers').addEventListener('input', () => markExternalResolverAsCustom('dns'));
 $('#schedule-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   setBusy(true, '正在更新定时任务');
@@ -1799,6 +2104,11 @@ const settingsPayloadFromForm = () => {
     mihomoControllerPort: Number($('#mihomo-controller-port').value),
     mihomoAutoStart: $('#mihomo-auto-start').checked,
     mihomoLogLevel: $('#mihomo-log-level').value,
+    mihomoDnsMode: mihomoDnsModeFromPreset(),
+    mihomoDnsServers: mihomoDnsServersFromInput(),
+    mihomoDohEndpoint: $('#mihomo-doh-endpoint').value,
+    mihomoDnsIpv6: $('#mihomo-dns-ipv6').checked,
+    mihomoTcpConcurrent: $('#mihomo-tcp-concurrent').checked,
     policyGroupName: $('#policy-group-name').value,
     policyGroupTargets,
     policyGroupExclusions,
@@ -1813,7 +2123,7 @@ const settingsPayloadFromForm = () => {
     connectTimeoutEnabled: $('#connect-timeout-enabled').checked,
     connectTimeoutSeconds: Number($('#connect-timeout-seconds').value),
     subscriptionProxyUrl: $('#subscription-proxy-url').value,
-    addressResolverStrategy: $('#resolver-strategy').value,
+    addressResolverStrategy: externalResolverStrategyFromPreset(),
     addressResolverDohEndpoint: $('#doh-endpoint').value,
     addressResolverDnsServers: dnsServersFromInput(),
     addressResolverFilterSurgeFakeIp: $('#filter-surge-fake-ip').checked,
@@ -1822,11 +2132,18 @@ const settingsPayloadFromForm = () => {
 
 $('#settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const previousPortStart = state.config.portStart;
   setBusy(true, '正在保存设置');
   try {
     state = await api.saveSettings(settingsPayloadFromForm());
     renderAll();
-    showToast('设置已保存。');
+    showToast(previousPortStart !== state.config.portStart
+      ? `设置已保存。立即同步后从 ${state.config.portStart} 重新分配节点端口，遇到占用会跳过。`
+      : engineDraftMode === 'mihomo'
+        ? '设置已保存。立即同步后会更新 Mihomo 配置。'
+        : engineDraftMode === 'surge-native'
+          ? '设置已保存。立即同步后会写入 Surge 原生 VLESS。'
+          : '设置已保存。');
   } catch (error) {
     showToast(error.message || String(error), true);
   } finally {
@@ -1838,12 +2155,16 @@ $('#confirm-engine-switch').addEventListener('click', async () => {
   const targetMode = engineDraftMode;
   if (targetMode === state.config.runtimeMode) return;
   const confirmed = await api.confirm({
-    title: targetMode === 'mihomo' ? '切换到 Mihomo 网关' : '切换到 sing-box External',
+    title: targetMode === 'mihomo'
+      ? '切换到 Mihomo 网关'
+      : targetMode === 'surge-native'
+        ? '切换到 Surge 原生 VLESS'
+        : '切换到 sing-box External',
     message: $('#engine-change-summary').textContent,
     detail: '切换前会保存当前设置，校验目标引擎并备份 Surge 配置。',
   });
   if (!confirmed) return;
-  setBusy(true, '正在切换运行引擎');
+  setBusy(true, '正在切换运行引擎', true, true);
   try {
     state = await api.saveSettings(settingsPayloadFromForm());
     const result = await api.switchEngine(targetMode);
@@ -1911,6 +2232,7 @@ $('#onboarding-choose-mihomo').addEventListener('click', async () => {
 
 const validateWizardEngineStep = () => {
   if (!onboardingDraftMode) throw new Error('请选择运行方式。');
+  if (onboardingDraftMode === 'surge-native') return;
   const dependency = selectedWizardDependency();
   const label = onboardingDraftMode === 'mihomo' ? 'Mihomo' : 'sing-box';
   if (!dependency.installed) throw new Error(`请先安装或选择 ${label} 可执行文件。`);

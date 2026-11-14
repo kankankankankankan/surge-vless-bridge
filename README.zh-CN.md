@@ -8,21 +8,22 @@
 
 ![Surge VLESS Bridge 桌面应用](./docs/images/dual-engine-external-1180x780.png)
 
-**让 Surge Mac 支持 VLESS，并可选择 sing-box External 或 Mihomo 网关。** External 模式保持原有每节点进程，Mihomo 模式使用单个后台进程和回环 SOCKS5 listeners。
+**让 Surge Mac 支持 VLESS，并可选择 sing-box External、Mihomo 网关或 Surge 原生 VLESS。** External 模式保持原有每节点进程，Mihomo 模式使用单个后台进程和回环 SOCKS5 listeners，原生模式直接写入 Surge 的 `vless` 策略。
 
-Surge Mac 不原生支持 VLESS 协议。该工具可读取明文、Base64、Clash YAML 和 Clash JSON 订阅，
+Surge Mac 6.12.0 起原生支持 VLESS。该工具可读取明文、Base64、Clash YAML 和 Clash JSON 订阅，
 按来源保留最近一次有效结果，并在某个订阅临时不可用时避免清空仍可工作的节点。
 
 ## 前置条件
 
-- 已安装 [sing-box](https://github.com/SagerNet/sing-box)（`brew install sing-box`）
+- External 模式需要 [sing-box](https://github.com/SagerNet/sing-box)（`brew install sing-box`）；Mihomo 模式需要 Mihomo，可在桌面应用中安装
+- 原生 VLESS 模式需要 Surge Mac 6.12.0 或更高版本，无需外部内核
 - Surge Mac 配置文件中包含 `[Proxy]` 和 `[Proxy Group]` 区块
 
 ## macOS 桌面应用
 
 仓库包含 Electron 桌面界面，可以管理带名称的订阅、切换运行引擎、预览更新、执行同步、检查并修复环境、
 安装内核、配置 DNS、恢复备份和管理 macOS 定时任务。界面还会显示当前流量链路、Mihomo 最近日志、
-中断更新恢复，以及仅在订阅直连失败后使用的可选 HTTP/HTTPS 代理重试。旧配置继续使用 External 模式。
+中断更新恢复，以及仅在订阅直连失败后使用的可选 HTTP/HTTPS 代理重试。旧配置继续使用 External 模式；Surge 原生 VLESS 需要 Surge Mac 6.12.0 或更高版本。
 
 定时任务由当前用户的 macOS LaunchAgent 执行。启用并保存后，即使关闭桌面窗口也会继续按计划同步。
 
@@ -44,21 +45,37 @@ GitHub Actions 会在原生 Intel 和 Apple 芯片 runner 上分别构建。Inte
 `arm64`，成品位于对应工作流运行记录的 Artifacts 区域。
 推送 `v1.6.0` 这类版本标签后，验证通过的两个 DMG 和 SHA-256 文件会自动发布到 GitHub Releases。
 
-## 让 AI Agent 帮你完成配置
+## Surge 原生 VLESS
 
-把下面这段话丢给 Claude Code、Cursor、Codex 之类的 agent，检测并安装 `sing-box`
-和 CLI、生成配置、同步、验证，整套流程它都能完成：
+桌面应用的配置向导和「设置 > 运行引擎」均可选择「Surge 原生 VLESS」。CLI 配置使用
+`"runtimeMode": "surge-native"`，并完成运行方式确认。同步直接更新 Surge `[Proxy]` 与策略组，
+保留预览、备份和定时同步，不创建本地监听端口。
 
-```text
-阅读 https://github.com/kankankankankankan/surge-vless-bridge/blob/master/docs/agent-setup.md
-然后帮我配置好 surge-vless-bridge
+Reality + Vision 节点生成示例：
+
+```ini
+[Proxy]
+Example = vless, node.example.com, 443, username=00000000-0000-4000-8000-000000000001, flow=xtls-rprx-vision, tls=true, reality-public-key=YOUR_PUBLIC_KEY, reality-short-id=01234567, sni=tls.example.com, ip-version=prefer-v4
 ```
 
-[docs/agent-setup.md](./docs/agent-setup.md) 里写清了命令顺序、配置文件的位置、`doctor` 输出怎么读，
-以及哪些命令必须先经过你确认。Agent 会向你索要订阅地址并确认 Surge 配置文件路径，其余项都有默认值；在真正
-写入之前，它会先用 `sync --dry-run` 给你看一遍改动。
+上例为格式示例，域名、用户 ID、公钥和 short-id 均需替换为自己的节点参数。
 
-想自己动手？往下看手动配置。
+- TLS 和 Reality 节点均显式写出 `tls=true`；明文节点不添加此项。Reality 本身也隐含 TLS。
+- Surge 的 Reality 固定使用 Chrome ClientHello，分享链接的 `fp` 和 Clash 的 `client-fingerprint` 不会原样保留。
+- Reality 使用自身握手验证，`skip-cert-verify` 不参与其证书验证。
+- Surge 原生 VLESS 内置 XUDP，无需额外写 `udp-relay=true`。
+- 基础 XHTTP 可转换；XHTTP `extra` 细分参数尚未映射，转换时会明确报错。
+
+Surge Mac 6.12.0+ 的代理编辑器支持 `vless://` 分享链接：点击「Share Link」旁的「Import…」，
+粘贴链接导入。该入口也支持 `Name = vless, ...` 策略行。分享链接导入属于 Surge 自身功能。
+
+原生模式使用 Surge 自己的 DNS 配置解析节点域名，Bridge 的 External 地址解析设置不会改写该 DNS。
+External 的 `addresses=` 只排除 VIF 路由，不指定 sing-box 实际连接的 IP，也不适用于原生模式。
+比较客户端连通性时，应核对相同节点、测试目标及解析地址；原生策略通过语法检查不代表实际连接成功。
+
+参考：[Surge VLESS 参数](https://manual.nssurge.com/policies/vless.html)、
+[分享链接导入](https://manual.nssurge.com/policies/overview.html#importing-from-share-links-ios-600-mac-6120)、
+[按域名指定 DNS](https://manual.nssurge.com/dns/local-dns-mapping.html#assigning-dns-servers)。
 
 ## 手动配置
 
@@ -196,18 +213,21 @@ surge-vless-bridge doctor
 | `udpRelay`           | `false`                                | 为 external 节点写入 `udp-relay=true` |
 | `udpTestEnabled`     | `false`                                | 为启用 UDP 的节点写入 `test-udp`      |
 | `udpTestTarget`      | `"apple.com@8.8.8.8"`                | Surge UDP 测试使用的域名和 IPv4       |
-| `tcpFastOpen`        | `false`                                | 为 sing-box 远程连接开启 TCP Fast Open |
+| `tcpFastOpen`        | `false`                                | 为 External、Mihomo 或原生 VLESS 开启 TCP Fast Open |
 | `connectTimeoutEnabled` | `false`                             | External 模式使用自定义远程连接超时   |
 | `connectTimeoutSeconds` | `10`                               | External 模式的远程连接超时秒数             |
 | `subscriptionProxyUrl` | `""`                                | 仅在订阅直连失败后重试的 HTTP/HTTPS 代理地址 |
 | `addressResolver`    | 见下方                                 | 为 `addresses=` 解析节点服务器域名    |
+| `mihomo.dnsMode`     | `"inherit"`                          | Mihomo 节点域名使用跟随、指定 DNS、DoH、DoT 或系统 DNS |
+| `mihomo.dnsIpv6`     | `true`                                 | 是否查询 Mihomo 节点服务器的 AAAA 记录 |
+| `mihomo.tcpConcurrent` | `true`                               | 多个节点服务器 IP 并发连接并采用最先成功的地址 |
 
 游戏、QUIC、语音通话或 UDP DNS 需要经过 VLESS 时，可以开启 `udpRelay`。生成的 sing-box SOCKS 入站支持
 UDP ASSOCIATE。上游节点不支持 UDP，或只需要 TCP 流量时保持关闭。
 
 开启 `udpTestEnabled` 后，Surge external 节点会增加 `test-udp=域名@IPv4`。该项依赖 `udpRelay`，默认测试目标为 `apple.com@8.8.8.8`。
 
-`tcpFastOpen` 在两种引擎中均可用。自定义连接超时仅用于 External，会向 sing-box outbound 写入 `connect_timeout=秒数s`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，因此使用内核默认值。
+`tcpFastOpen` 在三种运行方式中均可用。自定义连接超时仅用于 External，会向 sing-box outbound 写入 `connect_timeout=秒数s`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，因此使用内核默认值。Surge 原生 VLESS 要求 Surge Mac 6.12.0 或更高版本，直接生成 `vless` 策略，不创建本地端口。
 
 `subscriptionProxyUrl` 只在订阅直连失败后使用，支持不带认证信息的 `http://` 或 `https://` 代理地址。
 它不会改变 Surge 流量路径或 VLESS 节点路由。
@@ -217,19 +237,22 @@ UDP ASSOCIATE。上游节点不支持 UDP，或只需要 TCP 流量时保持关�
 | 策略     | 说明                                                                    |
 | -------- | ----------------------------------------------------------------------- |
 | `doh`    | 使用 `addressResolver.dohEndpoint` 解析，这是默认值。                   |
+| `dot`    | 使用 `tls://` 端点执行带证书校验的 DoT 查询。                           |
 | `dns`    | 使用 `addressResolver.dnsServers` 解析，例如 `["1.1.1.1", "8.8.8.8"]`。 |
 | `system` | 使用 Node.js 系统 DNS 解析。                                            |
 | `off`    | 不在生成的 Surge external proxy 条目中写入 `addresses=`。               |
 
-除 `off` 外，任何策略解析不到可用地址时都会自动回退到其余解析方式，因此 DoH 端点不可用或系统解析被
-fake-ip 污染时，仍然可以拿到真实 IP。
+除 `off` 外，任何策略解析不到可用地址时都会自动回退到其他已配置的解析方式，因此加密端点不可用或系统解析被
+fake-ip 污染时，仍有机会拿到真实 IP。
 
-Surge 的 `addresses=` 只接受单个地址。当一个域名解析出多个结果时优先写入 IPv4，只有在没有 A 记录时
-才会写 IPv6。
+Surge 支持重复的 `addresses=` 参数。解析到的所有 IPv4 和 IPv6 地址都会写入，IPv4 排在前面；
+写入前会先过滤 Surge fake IP。
 
 `addressResolver.filterSurgeFakeIp` 默认为 `true`。它会在写入 `addresses=` 前过滤 `198.18.0.0/15` 地址，避免把 Surge fake-ip 结果固定到 external proxy 条目里。
 
 这里解析的是 VLESS 节点的服务器域名。解析只在同步生成 Surge external 节点时执行，不处理节点显示名称，也不影响经代理访问的网站域名。
+
+Mihomo 使用自身 DNS 模块在运行时解析节点服务器域名。`mihomo.dnsMode` 可设为 `inherit`、`dns`、`doh`、`dot` 或 `system`；独立值分别写入 `mihomo.dnsServers` 和 `mihomo.dohEndpoint`。桌面端为 Mihomo 与 External 提供同一套可编辑预设，选项直接显示端点值，包括 AliDNS、DNSPod 的 DoH/DoT，以及 Cloudflare、Google、Quad9。生成配置会显式设置 `proxy-server-nameserver`，不开放 DNS listener。Surge 增强模式下应优先使用指定 DNS、DoH、DoT 或跟随现有的非系统解析设置，避免系统 DNS 返回 Fake IP。
 
 ### 为什么默认使用 `doh`
 
@@ -333,4 +356,4 @@ npm run build
 为我们的 Mihomo 网关设计提供了参考；其[自动更新文档](https://github.com/ssfun/surge-external-bridge/blob/main/docs/auto-update.md)
 也为后续更新验收与故障恢复提供了借鉴。
 本项目使用独立 Mihomo 可执行文件和每节点回环监听；该参考项目内嵌 Mihomo，通过带认证的共享 SOCKS5 入口分配节点。
-核对版本、采纳建议和许可证边界见[参考项目评估](docs/dual-engine-mihomo-development.zh-CN.md#20-mihomo-参考项目与更新评估2026-10-31)。
+本项目保留 MIT 许可证；引用和致谢不代表将参考项目的 GPL 源码纳入本项目。

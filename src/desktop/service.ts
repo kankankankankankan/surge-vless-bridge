@@ -256,6 +256,9 @@ export class DesktopService {
     if (!['silent', 'error', 'warning', 'info', 'debug'].includes(input.mihomoLogLevel)) {
       throw new Error('Mihomo 日志级别无效。');
     }
+    if (!['inherit', 'dns', 'doh', 'dot', 'system'].includes(input.mihomoDnsMode)) {
+      throw new Error('Mihomo 节点 DNS 模式无效。');
+    }
     if (subscriptionProxyUrl) {
       let proxy: URL;
       try {
@@ -292,15 +295,18 @@ export class DesktopService {
 
     const dohEndpoint = input.addressResolverDohEndpoint.trim();
     const dnsServers = uniqueLines(input.addressResolverDnsServers);
-    if (input.addressResolverStrategy === 'doh') {
+    const mihomoDohEndpoint = input.mihomoDohEndpoint.trim();
+    const mihomoDnsServers = uniqueLines(input.mihomoDnsServers);
+    if (input.addressResolverStrategy === 'doh' || input.addressResolverStrategy === 'dot') {
       let url: URL;
       try {
         url = new URL(dohEndpoint);
       } catch {
-        throw new Error('DoH 地址格式无效。');
+        throw new Error('加密 DNS 地址格式无效。');
       }
-      if (url.protocol !== 'https:') {
-        throw new Error('DoH 地址必须使用 HTTPS。');
+      const expectedProtocol = input.addressResolverStrategy === 'dot' ? 'tls:' : 'https:';
+      if (url.protocol !== expectedProtocol) {
+        throw new Error(input.addressResolverStrategy === 'dot' ? 'DoT 地址必须使用 tls://。' : 'DoH 地址必须使用 HTTPS。');
       }
     }
     if (input.addressResolverStrategy === 'dns') {
@@ -311,6 +317,28 @@ export class DesktopService {
         new Resolver().setServers(dnsServers);
       } catch {
         throw new Error('指定 DNS 中包含无效地址。');
+      }
+    }
+    if (input.mihomoDnsMode === 'doh' || input.mihomoDnsMode === 'dot') {
+      let url: URL;
+      try {
+        url = new URL(mihomoDohEndpoint);
+      } catch {
+        throw new Error('Mihomo 加密 DNS 地址格式无效。');
+      }
+      const expectedProtocol = input.mihomoDnsMode === 'dot' ? 'tls:' : 'https:';
+      if (url.protocol !== expectedProtocol) {
+        throw new Error(input.mihomoDnsMode === 'dot' ? 'Mihomo DoT 地址必须使用 tls://。' : 'Mihomo DoH 地址必须使用 HTTPS。');
+      }
+    }
+    if (input.mihomoDnsMode === 'dns') {
+      if (mihomoDnsServers.length === 0) {
+        throw new Error('请至少填写一个 Mihomo DNS 服务器。');
+      }
+      try {
+        new Resolver().setServers(mihomoDnsServers);
+      } catch {
+        throw new Error('Mihomo 指定 DNS 中包含无效地址。');
       }
     }
     const udpTestTarget = input.udpTestTarget.trim() || 'apple.com@8.8.8.8';
@@ -332,6 +360,11 @@ export class DesktopService {
         controllerPort: mihomoControllerPort,
         autoStart: Boolean(input.mihomoAutoStart),
         logLevel: input.mihomoLogLevel,
+        dnsMode: input.mihomoDnsMode,
+        dnsServers: mihomoDnsServers,
+        dohEndpoint: mihomoDohEndpoint,
+        dnsIpv6: Boolean(input.mihomoDnsIpv6),
+        tcpConcurrent: Boolean(input.mihomoTcpConcurrent),
       },
       policyGroupName,
       policyGroupTargets,
@@ -387,6 +420,13 @@ export class DesktopService {
     } catch {
       return 0;
     }
+  }
+
+  private async countNativeNodes(config: CliConfig) {
+    if (!config.surgeConfigPath) return 0;
+    const profile = await readTextFile(config.surgeConfigPath).catch(() => '');
+    const block = profile.match(/# vless start([\s\S]*?)# vless end/);
+    return block?.[1]?.split('\n').filter((line) => /^\s*[^#].*=\s*vless\s*,/i.test(line)).length ?? 0;
   }
 
   private async countMihomoNodes(config: CliConfig) {
@@ -471,7 +511,9 @@ export class DesktopService {
       loaded.config.surgeConfigPath ? readTextFile(loaded.config.surgeConfigPath).catch(() => '') : Promise.resolve(''),
       loaded.config.runtimeMode === 'mihomo'
         ? this.countMihomoNodes(loaded.config)
-        : this.countNodes(loaded.config.outputDir),
+        : loaded.config.runtimeMode === 'surge-native'
+          ? this.countNativeNodes(loaded.config)
+          : this.countNodes(loaded.config.outputDir),
       this.listBackups(loaded.config.backupDir),
       readHistory(this.historyPath),
       this.scheduler.getSettings(),
@@ -513,6 +555,11 @@ export class DesktopService {
         mihomoControllerPort: loaded.config.mihomo.controllerPort,
         mihomoAutoStart: loaded.config.mihomo.autoStart,
         mihomoLogLevel: loaded.config.mihomo.logLevel,
+        mihomoDnsMode: loaded.config.mihomo.dnsMode,
+        mihomoDnsServers: loaded.config.mihomo.dnsServers,
+        mihomoDohEndpoint: loaded.config.mihomo.dohEndpoint,
+        mihomoDnsIpv6: loaded.config.mihomo.dnsIpv6,
+        mihomoTcpConcurrent: loaded.config.mihomo.tcpConcurrent,
         policyGroupName: loaded.config.policyGroupName,
         policyGroupTargets: loaded.config.policyGroupTargets,
         policyGroupExclusions: loaded.config.policyGroupExclusions,
@@ -861,16 +908,18 @@ export class DesktopService {
 
     if (!loaded.config.runtimeModeConfirmed) {
       try {
-        const dependency =
-          targetMode === 'mihomo'
-            ? (await this.mihomoStatus(loaded.config.mihomo.binary)).status
-            : (await this.singBoxStatus(loaded.config.singBoxBinary)).status;
-        const engineLabel = targetMode === 'mihomo' ? 'Mihomo' : 'sing-box';
-        if (!dependency.installed) {
-          throw new Error(`请先安装或选择 ${engineLabel} 可执行文件。`);
-        }
-        if (!dependency.currentVersion) {
-          throw new Error(`无法识别 ${engineLabel} 版本，请重新安装或选择正确的可执行文件。`);
+        if (targetMode !== 'surge-native') {
+          const dependency =
+            targetMode === 'mihomo'
+              ? (await this.mihomoStatus(loaded.config.mihomo.binary)).status
+              : (await this.singBoxStatus(loaded.config.singBoxBinary)).status;
+          const engineLabel = targetMode === 'mihomo' ? 'Mihomo' : 'sing-box';
+          if (!dependency.installed) {
+            throw new Error(`请先安装或选择 ${engineLabel} 可执行文件。`);
+          }
+          if (!dependency.currentVersion) {
+            throw new Error(`无法识别 ${engineLabel} 版本，请重新安装或选择正确的可执行文件。`);
+          }
         }
 
         const confirmedConfig =
@@ -882,7 +931,7 @@ export class DesktopService {
           runtimeModeConfirmed: true,
           mihomo: confirmedConfig.mihomo,
         });
-        const message = `已选择 ${targetMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}。`;
+        const message = `已选择 ${targetMode === 'mihomo' ? 'Mihomo 网关' : targetMode === 'surge-native' ? 'Surge 原生 VLESS' : 'sing-box External'}。`;
         await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message });
         return { success: true, message, output: message };
       } catch (error) {
@@ -914,13 +963,13 @@ export class DesktopService {
         await this.dependencies.stopMihomoService();
       }
       await this.dependencies.switchSync(targetConfig, { dryRun: true });
-      if (targetMode === 'external') {
+      if (targetMode === 'external' || targetMode === 'surge-native') {
         await this.dependencies.stopMihomoService();
       }
       const result = await this.dependencies.switchSync(targetConfig);
       await this.updateConfig({ runtimeMode: targetMode, runtimeModeConfirmed: true, mihomo: targetConfig.mihomo });
-      if (targetMode === 'external') await this.dependencies.stopMihomoService({ uninstall: true });
-      const message = `运行引擎已切换为 ${targetMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}。`;
+      if (targetMode === 'external' || targetMode === 'surge-native') await this.dependencies.stopMihomoService({ uninstall: true });
+      const message = `运行引擎已切换为 ${targetMode === 'mihomo' ? 'Mihomo 网关' : targetMode === 'surge-native' ? 'Surge 原生 VLESS' : 'sing-box External'}。`;
       await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message, count: result.count });
       return { success: true, message, output: message, count: result.count };
     } catch (error) {

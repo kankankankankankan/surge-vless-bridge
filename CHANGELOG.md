@@ -2,6 +2,58 @@
 
 ## Unreleased
 
+### Changed
+
+- Emit `tls=true` explicitly for native Reality policies, retaining their public key, short ID, SNI and Vision flow.
+- Document native VLESS parameters, share-link import and node DNS boundaries in both READMEs.
+- Keep agent instructions and internal development handoffs local.
+
+## [1.8.2-beta.5] - 2026-11-15
+
+### Added
+
+- Add a Surge Native VLESS runtime that converts VLESS subscriptions directly to native `vless` policies without starting sing-box or Mihomo.
+- Map RAW, TLS, Reality, Vision, WebSocket, HTTPUpgrade, gRPC, XHTTP and VLESS Encryption parameters.
+- Add the native VLESS option to the setup wizard and settings, with a Surge Mac 6.12.0 minimum-version note.
+
+### Validation
+
+- Add regression coverage for native policy lines, XHTTP, gRPC, Reality, Encryption and syncs that create no external-engine node files.
+
+## [1.8.2-beta.4] - 2026-11-08
+
+### Fixed
+
+- Give loading spinners explicit rotation endpoints; interpolating between `translateZ(0)` and a full rotation could leave the visual stationary while its timeline advanced.
+- Limit the startup watchdog to pending startup reads so it cannot hide a later operation's spinner or report a false startup timeout.
+- Rotate the sidebar refresh icon and show the current operation while busy.
+- Explain the inclusive starting port, valid range, occupied-port skipping and sync requirement. Local rebuild continues to retain generated ports.
+
+### Validation
+
+- Compare naturally advancing transforms and captured spinner frames during startup and engine switches at three window widths.
+- Cover lower starting ports in both backends, occupied-port skipping, generated listener/profile consistency and rejection below 1024.
+
+## [1.8.2-beta.3] - 2026-11-08
+
+### Changed
+
+- Write every resolved real IPv4 and IPv6 address to repeated Surge `addresses=` parameters, keeping IPv4 first and filtering Surge fake IPs.
+- Add configurable Mihomo node DNS modes for inherited resolution, dedicated DNS, DoH, DoT, or the macOS system resolver.
+- Write Mihomo `proxy-server-nameserver` explicitly so node domains do not depend on Surge Enhanced Mode's fake-IP system resolver.
+- Allow disabling Mihomo AAAA lookups while retaining IPv4 preference when IPv6 resolution is enabled.
+- Add editable public and local custom presets to Mihomo node DNS settings.
+- Enable configurable Mihomo `tcp-concurrent` by default to race multiple resolved node addresses.
+- Show resolver endpoint values directly in desktop DNS choices and reuse one preset catalog across External and Mihomo.
+- Add encrypted AliDNS and DNSPod DoH/DoT presets without adding domestic plain UDP presets.
+- Resolve External node domains through standard binary DoH or certificate-verified DoT before writing all real addresses to Surge.
+
+### Fixed
+
+- Keep engine-switch progress fixed at the center of the window, blocking background interaction and scrolling until success or failure, then restore the prior scroll position.
+- Remove continuous backdrop blur repainting from the loading cover so its spinner stays on a dedicated compositor layer.
+- Keep the startup "Reading configuration" indicator visible long enough to be perceived on fast local reads.
+
 ## [1.8.1] - 2026-10-31
 
 ### Fixed
@@ -290,8 +342,8 @@ All notable changes to this project are documented here. The format follows
   profile, and anything skipped can still be filled in by hand afterwards.
 - `--no-input` writes the config template without asking anything. `init` also detects a missing TTY
   on its own, so it never blocks under an agent, in CI, or behind a pipe.
-- [docs/agent-setup.md](./docs/agent-setup.md), a guide for driving the CLI with an AI agent: command
-  order, config path rules, how to read `doctor`, and which commands must not run unconfirmed.
+- An AI agent setup guide covering command order, config paths, `doctor` and confirmation boundaries.
+  This development guide is kept locally starting with 1.8.2-beta.5.
 
 ### Changed
 

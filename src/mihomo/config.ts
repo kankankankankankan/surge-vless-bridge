@@ -50,7 +50,9 @@ const transportOptions = (outbound: SingBoxVlessOutbound) => {
 export const mapVlessToMihomoProxy = (
   outbound: SingBoxVlessOutbound,
   name: string,
-  config: Pick<CliConfig, 'udpRelay' | 'tcpFastOpen'>,
+  config: Pick<CliConfig, 'udpRelay' | 'tcpFastOpen'> & {
+    mihomo?: Pick<CliConfig['mihomo'], 'dnsIpv6'>;
+  },
 ): Record<string, unknown> => ({
   name,
   type: 'vless',
@@ -58,7 +60,9 @@ export const mapVlessToMihomoProxy = (
   port: outbound.server_port,
   // Keep Mihomo's domain resolution aligned with sing-box External, which prefers IPv4
   // for node endpoints. Literal IPv6 nodes must remain untouched.
-  ...(isIP(outbound.server) === 0 ? { 'ip-version': 'ipv4-prefer' } : {}),
+  ...(isIP(outbound.server) === 0
+    ? { 'ip-version': config.mihomo?.dnsIpv6 === false ? 'ipv4' : 'ipv4-prefer' }
+    : {}),
   uuid: outbound.uuid,
   udp: config.udpRelay,
   ...(config.tcpFastOpen ? { tfo: true } : {}),
@@ -84,13 +88,49 @@ export const mapVlessToMihomoProxy = (
   ...transportOptions(outbound),
 });
 
-export const buildMihomoDocument = ({ nodes, config }: { nodes: MihomoNode[]; config: CliConfig }) => ({
+export const mihomoNodeResolvers = (config: CliConfig): string[] => {
+  const mode = config.mihomo.dnsMode;
+  if (mode === 'dns') return config.mihomo.dnsServers.length ? config.mihomo.dnsServers : ['system'];
+  if (mode === 'doh' || mode === 'dot') {
+    return config.mihomo.dohEndpoint ? [config.mihomo.dohEndpoint] : ['system'];
+  }
+  if (mode === 'system') return ['system'];
+
+  if (config.addressResolver.strategy === 'dns' && config.addressResolver.dnsServers.length) {
+    return config.addressResolver.dnsServers;
+  }
+  if (
+    (config.addressResolver.strategy === 'doh' || config.addressResolver.strategy === 'dot') &&
+    config.addressResolver.dohEndpoint
+  ) {
+    return [config.addressResolver.dohEndpoint];
+  }
+  return ['system'];
+};
+
+export const mihomoBootstrapResolvers = (config: CliConfig): string[] => {
+  const candidates = [...config.mihomo.dnsServers, ...config.addressResolver.dnsServers];
+  const addresses = [...new Set(candidates.filter((server) => isIP(server) !== 0))];
+  return addresses.length ? addresses : ['1.1.1.1', '8.8.8.8'];
+};
+
+export const buildMihomoDocument = ({ nodes, config }: { nodes: MihomoNode[]; config: CliConfig }) => {
+  const resolvers = mihomoNodeResolvers(config);
+  return {
   mode: 'direct',
   'log-level': config.mihomo.logLevel,
-  ipv6: true,
+  ipv6: config.mihomo.dnsIpv6,
+  'tcp-concurrent': config.mihomo.tcpConcurrent,
   'allow-lan': false,
   'external-controller': `${config.mihomo.controllerHost}:${config.mihomo.controllerPort}`,
   secret: config.mihomo.controllerSecret,
+  dns: {
+    enable: true,
+    ipv6: config.mihomo.dnsIpv6,
+    'default-nameserver': mihomoBootstrapResolvers(config),
+    nameserver: resolvers,
+    'proxy-server-nameserver': resolvers,
+  },
   proxies: nodes.map((node) => node.proxy),
   listeners: nodes.map((node) => ({
     name: `surge-vless-${node.port}`,
@@ -101,7 +141,8 @@ export const buildMihomoDocument = ({ nodes, config }: { nodes: MihomoNode[]; co
     proxy: node.name,
   })),
   rules: ['MATCH,DIRECT'],
-});
+  };
+};
 
 export const renderMihomoConfig = (input: { nodes: MihomoNode[]; config: CliConfig }) =>
   stringify(buildMihomoDocument(input), { lineWidth: 0 });

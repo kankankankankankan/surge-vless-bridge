@@ -15,9 +15,11 @@ const state = {
     subscriptionNames: ['主订阅', '备用订阅'], subscriptionOptions: [sourceOptions(), sourceOptions()], vlessNodes: [],
     surgeConfigPath: '/tmp/bridge-fixture/profile.conf', singBoxBinary: '/tmp/bridge-fixture/sing-box', mihomoBinary: '/tmp/bridge-fixture/mihomo',
     mihomoDataDir: '/tmp/bridge-fixture/mihomo-data', mihomoControllerPort: 19090, mihomoAutoStart: true, mihomoLogLevel: 'info',
+    mihomoDnsMode: 'dns', mihomoDnsServers: ['192.0.2.53'], mihomoDohEndpoint: 'https://dns.example/dns-query', mihomoDnsIpv6: true, mihomoTcpConcurrent: true,
     policyGroupName: 'VLESS', policyGroupTargets: [], policyGroupExclusions: [], policyGroupTargetModes: {},
     portStart: 2081, backupKeep: 20, autoReload: true, udpRelay: true, udpTestEnabled: false, udpTestTarget: 'dns.google@8.8.8.8',
     tcpFastOpen: false, connectTimeoutEnabled: false, connectTimeoutSeconds: 5,
+    subscriptionProxyUrl: '',
     addressResolverStrategy: 'off', addressResolverDohEndpoint: '', addressResolverDnsServers: [], addressResolverFilterSurgeFakeIp: true,
   },
   doctor: { checks: ['nodeSources', 'surgeConfigPath', 'mihomoBinary', 'proxy-group-section', 'proxy-section', 'rule-section', 'mihomo-config', 'mihomo-launch-agent', 'mihomo-controller', 'mihomo-listeners'].map(label => ({ label, level: 'ok', detail: '检查通过' })), failures: 0, warnings: 0 },
@@ -33,9 +35,13 @@ const state = {
 let saved;
 const diagnosed = [];
 const errors = [];
+let smokeExitCode = 0;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 let window;
 let root;
+let releaseStartup;
+const startupGate = new Promise(resolve => { releaseStartup = resolve; });
+let firstStateRequest = true;
 const evaluate = code => window.webContents.executeJavaScript(code);
 const until = async code => {
   for (let index = 0; index < 100; index++) { if (await evaluate(code)) return; await wait(50); }
@@ -49,17 +55,52 @@ const screenshot = async name => {
   await writeFile(join(output, name), (await window.webContents.capturePage()).toPNG());
 };
 
+const assertSpinnerMoves = async label => {
+  const selector = '#loading-cover .spinner';
+  const before = await evaluate(`(() => { const el=document.querySelector('${selector}'); const r=el.getBoundingClientRect(); return {x:Math.floor(r.x),y:Math.floor(r.y),width:Math.ceil(r.width),height:Math.ceil(r.height),transform:getComputedStyle(el).transform,display:getComputedStyle(el).display,hidden:el.closest('.hidden')!==null}; })()`);
+  assert.equal(before.hidden, false, `${label}: spinner must be visible`);
+  assert.notEqual(before.display, 'none');
+  assert.ok(before.width > 0 && before.height > 0);
+  const rect = { x: before.x - 4, y: before.y - 4, width: before.width + 8, height: before.height + 8 };
+  const frameA = (await window.webContents.capturePage(rect)).toPNG();
+  const sidebarBefore = await evaluate(`getComputedStyle(document.querySelector('#refresh-state svg')).transform`);
+  await wait(140);
+  const transform = await evaluate(`getComputedStyle(document.querySelector('${selector}')).transform`);
+  const frameB = (await window.webContents.capturePage(rect)).toPNG();
+  assert.notEqual(before.transform, transform, `${label}: rotation must advance without seeking the timeline`);
+  assert.notDeepEqual(frameA, frameB, `${label}: rendered spinner pixels must change`);
+  assert.notEqual(sidebarBefore, await evaluate(`getComputedStyle(document.querySelector('#refresh-state svg')).transform`), `${label}: sidebar refresh icon must rotate`);
+  assert.equal(await evaluate(`document.querySelector('#refresh-state').classList.contains('is-loading')`), true);
+  if (output) {
+    await writeFile(join(output, `${label}-frame-a.png`), frameA);
+    await writeFile(join(output, `${label}-frame-b.png`), frameB);
+  }
+};
+
 (async () => {
   root = await mkdtemp(join(tmpdir(), 'svb-ui-controls-'));
   app.setPath('userData', root);
   if (output) await mkdir(output, { recursive: true });
   ipcMain.handle('desktop:get-version', () => require('../package.json').version);
-  ipcMain.handle('desktop:get-state', () => state);
+  ipcMain.handle('desktop:get-state', async () => {
+    if (firstStateRequest) {
+      firstStateRequest = false;
+      await startupGate;
+    }
+    return state;
+  });
   ipcMain.handle('desktop:inspect-policy-groups', () => []);
   ipcMain.handle('desktop:check-mihomo-update', () => dependency);
   ipcMain.handle('desktop:check-sing-box-update', () => state.environment.singBox);
   ipcMain.handle('desktop:preview-source-filters', (_event, { options }) => ({ available: true, total: 3, matched: options.include ? 2 : 3, skipped: 0 }));
   ipcMain.handle('desktop:save-sources', (_event, value) => { saved = value; Object.assign(state.config, value); return state; });
+  ipcMain.handle('desktop:save-settings', (_event, value) => { Object.assign(state.config, value); return state; });
+  ipcMain.handle('desktop:confirm', () => true);
+  ipcMain.handle('desktop:switch-engine', async (_event, targetMode) => {
+    await wait(1100);
+    state.config.runtimeMode = targetMode;
+    return { success: true, message: `已切换到 ${targetMode}` };
+  });
   ipcMain.handle('desktop:diagnose-node', async (_event, node) => {
     diagnosed.push(node); await wait(300);
     const part = { success: true, skipped: false, detail: '测试通过', target: 'fixture.invalid', latencyMs: 12 };
@@ -67,10 +108,17 @@ const screenshot = async name => {
   });
   await app.whenReady();
   window = new BrowserWindow({ width: 1180, height: 780, show: false,
-    webPreferences: { preload: resolve('dist/desktop/preload.js'), contextIsolation: true, nodeIntegration: false } });
+    webPreferences: { preload: resolve('dist/desktop/preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
+  window.once('ready-to-show', () => window.showInactive());
   window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message); });
   await window.loadFile(resolve('dist/desktop/renderer/index.html'));
+  await until(`document.querySelector('#refresh-state').classList.contains('is-loading')`);
+  await assertSpinnerMoves('startup');
+  assert.equal(await evaluate(`document.querySelector('#loading-status').textContent`), '正在读取配置');
+  await screenshot('startup-loading.png');
+  releaseStartup();
   await until(`document.querySelector('#loading-cover').classList.contains('hidden') && document.querySelectorAll('[data-diagnostic-port]').length===3`);
+  assert.equal(await evaluate(`document.querySelector('#refresh-state').classList.contains('is-loading')`), false);
   assert.equal(await evaluate(`document.querySelector('#traffic-flow-note').textContent.includes('桥接后端出站')`), true);
   assert.equal(await evaluate(`document.querySelectorAll('#schedule-run-at-load').length`), 1);
   assert.equal(await evaluate(`document.querySelector('#schedule-options').classList.contains('is-disabled')`), true);
@@ -117,6 +165,44 @@ const screenshot = async name => {
   await screenshot('diagnostics-720.png');
   const overflow = await evaluate(`document.querySelector('#node-diagnostics').scrollWidth > document.querySelector('#node-diagnostics').clientWidth`);
   assert.equal(overflow, false);
+  for (const width of [1180, 960, 720]) {
+    if (width === 720) {
+      window.webContents.debugger.attach('1.3');
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    }
+    window.setContentSize(width, width === 720 ? 680 : 780);
+    await until(`innerWidth === ${width}`);
+    await click('[data-view="settings"]');
+    const targetMode = state.config.runtimeMode === 'mihomo' ? 'external' : 'mihomo';
+    await click(`[data-runtime-mode="${targetMode}"]`);
+    await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    await evaluate(`document.querySelector('.main-content').scrollTop=document.querySelector('.main-content').scrollHeight`);
+    const scrollTop = await evaluate(`document.querySelector('.main-content').scrollTop`);
+    assert.ok(scrollTop > 0, `Settings must be scrollable at ${width}px`);
+    await click('#confirm-engine-switch');
+    await until(`document.querySelector('#loading-cover').classList.contains('window-lock')`);
+    await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+    const lockState = await evaluate(`(() => { const cover=document.querySelector('#loading-cover'); const rect=cover.getBoundingClientRect(); const main=document.querySelector('.main-content'); const style=getComputedStyle(cover); return {position:style.position, centerX:(rect.left+rect.right)/2, centerY:(rect.top+rect.bottom)/2, viewportX:innerWidth/2, viewportY:innerHeight/2, inert:document.querySelector('.app-shell').inert, overflow:getComputedStyle(main).overflow, scrollTop:main.scrollTop}; })()`);
+    assert.equal(lockState.position, 'fixed');
+    assert.ok(Math.abs(lockState.centerX - lockState.viewportX) < 1 && Math.abs(lockState.centerY - lockState.viewportY) < 1, `Loading cover must stay centered at ${width}px`);
+    assert.equal(lockState.inert, true);
+    assert.equal(lockState.overflow, 'hidden');
+    assert.equal(lockState.scrollTop, scrollTop);
+    await assertSpinnerMoves(`engine-switch-${width}`);
+    window.webContents.sendInputEvent({ type: 'mouseWheel', x: Math.floor(width / 2), y: 300, deltaY: -480, canScroll: true });
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'PageUp' });
+    await evaluate(`document.querySelector('.main-content').scrollTop=0`);
+    await wait(80);
+    assert.equal(await evaluate(`document.querySelector('.main-content').scrollTop`), scrollTop, `Scroll position must remain locked at ${width}px`);
+    await screenshot(`engine-switch-lock-${width}.png`);
+    await until(`document.querySelector('#loading-cover').classList.contains('hidden')`);
+    assert.equal(await evaluate(`document.documentElement.classList.contains('is-window-locked') || document.querySelector('.app-shell').inert`), false);
+    const restoredScroll = await evaluate(`(() => { const main=document.querySelector('.main-content'); return {top:main.scrollTop, max:main.scrollHeight-main.clientHeight}; })()`);
+    assert.ok(Math.abs(restoredScroll.top - Math.min(scrollTop, restoredScroll.max)) < 1, `Scroll position must restore to the nearest valid position at ${width}px`);
+    assert.equal(state.config.runtimeMode, targetMode);
+  }
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+  window.webContents.debugger.detach();
   if (output) {
     await until(`!document.querySelector('#toast').classList.contains('show')`);
     for (const width of [1180, 960, 720]) {
@@ -143,6 +229,32 @@ const screenshot = async name => {
           await evaluate(`document.querySelector('#schedule-kind').value='interval';document.querySelector('#schedule-kind').dispatchEvent(new Event('change',{bubbles:true}))`);
           await click('#schedule-enabled');
         }
+        if (view === 'settings') {
+          const customDnsBeforePresets = await evaluate(`document.querySelector('#mihomo-dns-servers').value`);
+          await evaluate(`document.querySelector('#mihomo-dns-preset').value='cloudflare-doh';document.querySelector('#mihomo-dns-preset').dispatchEvent(new Event('change',{bubbles:true}))`);
+          assert.equal(await evaluate(`document.querySelector('#mihomo-doh-endpoint').value`), 'https://1.1.1.1/dns-query');
+          await evaluate(`document.querySelector('#mihomo-dns-preset').value='google-dns';document.querySelector('#mihomo-dns-preset').dispatchEvent(new Event('change',{bubbles:true}))`);
+          assert.equal(await evaluate(`document.querySelector('#mihomo-dns-servers').value`), '8.8.8.8\n8.8.4.4');
+          await evaluate(`document.querySelector('#mihomo-dns-preset').value='custom-dns';document.querySelector('#mihomo-dns-preset').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#mihomo-dns-preset').scrollIntoView({block:'center',behavior:'instant'})`);
+          assert.equal(await evaluate(`document.querySelector('#mihomo-dns-servers').value`), customDnsBeforePresets);
+          await input('#mihomo-dns-servers', '192.0.2.54');
+          assert.equal(await evaluate(`document.querySelector('#mihomo-dns-preset').value`), 'custom-dns');
+          await wait(100);
+          await screenshot(`settings-mihomo-dns-${width}.png`);
+          assert.equal(await evaluate(`document.querySelector('#mihomo-dns-servers-field').classList.contains('hidden')`), false);
+          assert.ok(await evaluate(`(() => { const section=document.querySelector('#mihomo-dns-preset').closest('.section-block'); return section.scrollWidth<=section.clientWidth; })()`), `Mihomo DNS settings must not overflow at ${width}px`);
+          await click('[data-runtime-mode="external"]');
+          await evaluate(`document.querySelector('#resolver-preset').value='alidns-dot';document.querySelector('#resolver-preset').dispatchEvent(new Event('change',{bubbles:true}))`);
+          assert.equal(await evaluate(`document.querySelector('#doh-endpoint').value`), 'tls://dns.alidns.com:853');
+          assert.equal(await evaluate(`document.querySelector('#external-encrypted-dns-label').textContent`), 'DoT 地址');
+          await input('#doh-endpoint', 'tls://dot.example:853');
+          assert.equal(await evaluate(`document.querySelector('#resolver-preset').value`), 'custom-dot');
+          await evaluate(`document.querySelector('#resolver-preset').scrollIntoView({block:'center',behavior:'instant'})`);
+          await wait(100);
+          await screenshot(`settings-external-dns-${width}.png`);
+          assert.ok(await evaluate(`(() => { const section=document.querySelector('#resolver-preset').closest('.section-block'); return section.scrollWidth<=section.clientWidth; })()`), `External DNS settings must not overflow at ${width}px`);
+          await click('[data-runtime-mode="mihomo"]');
+        }
       }
       await evaluate(`document.querySelector('#mihomo-settings details').open=true; document.querySelector('#mihomo-settings details').scrollIntoView({block:'center',behavior:'instant'})`);
       await wait(150);
@@ -162,8 +274,7 @@ const screenshot = async name => {
   }
   assert.deepEqual(errors, []);
   console.log('Desktop controls passed: filtering, save alignment, disabled source, batch selection/progress/stop, narrow layout.');
-})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
-  window?.destroy();
+})().catch(error => { console.error(error); smokeExitCode = 1; }).finally(async () => {
   if (root) await rm(root, { recursive: true, force: true });
-  app.exit(process.exitCode || 0);
+  app.exit(smokeExitCode);
 });

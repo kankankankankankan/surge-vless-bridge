@@ -48,10 +48,10 @@ const clashProxyToVless = (proxy: Record<string, unknown>, index: number): strin
   if (enabled(record(proxy.smux).enabled)) unsupported('暂不支持 smux。');
 
   const network = string(proxy.network).toLowerCase() || 'tcp';
-  if (!['tcp', 'ws', 'grpc', 'httpupgrade'].includes(network)) {
-    unsupported('暂不支持该 network，仅支持 TCP、WS、gRPC 和 HTTP Upgrade。');
+  if (!['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'splithttp'].includes(network)) {
+    unsupported('暂不支持该 network，仅支持 TCP、WS、gRPC、HTTP Upgrade 和 XHTTP。');
   }
-  params.set('type', network);
+  params.set('type', network === 'splithttp' ? 'xhttp' : network);
   const ws = record(proxy['ws-opts']);
   const headers = record(ws.headers ?? proxy['ws-headers']);
   if (network === 'ws') {
@@ -78,6 +78,12 @@ const clashProxyToVless = (proxy: Record<string, unknown>, index: number): strin
     const upgrade = record(proxy['httpupgrade-opts']);
     params.set('path', string(upgrade.path) || '/');
     if (upgrade.host) params.set('host', string(upgrade.host));
+  } else if (network === 'xhttp' || network === 'splithttp') {
+    const xhttp = record(proxy['xhttp-opts'] ?? proxy['splithttp-opts']);
+    params.set('path', string(xhttp.path) || '/');
+    if (xhttp.host) params.set('host', string(xhttp.host));
+    if (xhttp.mode) params.set('mode', string(xhttp.mode));
+    if (xhttp.extra) params.set('extra', typeof xhttp.extra === 'string' ? xhttp.extra : JSON.stringify(xhttp.extra));
   }
 
   const reality = record(proxy['reality-opts']);
