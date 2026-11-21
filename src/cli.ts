@@ -59,7 +59,7 @@ const version = () => {
   return cachedVersion;
 };
 
-const helpText = () => `Use VLESS subscriptions in Surge Mac with sing-box External, Mihomo, or Surge native VLESS.
+const helpText = () => `Convert Surge subscriptions with sing-box External, Mihomo, or Surge native protocols.
 
 Usage:
   surge-vless-bridge <command> [flags]
@@ -87,7 +87,7 @@ Config flags:
 
 Runtime selection:
   Set runtimeMode to "external", "mihomo", or "surge-native" in the config file.
-  Surge native VLESS requires Surge Mac 6.12.0 or newer and does not need an external core.
+  Surge native VLESS requires Surge Mac 6.12.0 or newer; native SS, VMess, Trojan, AnyTLS, Hysteria2 and TUIC use their own policy types.
   Mihomo paths, controller port and service settings live under the mihomo object.
 
 Command flags:

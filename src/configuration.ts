@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: 配置文件、系统安装路径与各模块的参数归一化规则。
+ * [OUTPUT]: 默认配置、配置读取与持久化入口。
+ * [POS]: CLI 与桌面共用的配置边界，校验单节点 AnyTLS SNI 设置。
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 import { constants } from 'node:fs';
 import { access, chmod, readdir, stat } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
@@ -14,6 +20,7 @@ import type {
 import { pathExists, readJsonFile, writeTextFile } from './utils/fs';
 import { DEFAULT_SUBSCRIPTION_HEADERS as DEFAULT_HEADERS, subscriptionHeaders } from './utils/subscription-headers';
 import { normalizeSubscriptionOptions, subscriptionOptionsForUrl } from './utils/subscription-options';
+import { normalizeAnyTlsSniOverrides } from './native/anytls-sni';
 
 export const CONFIG_FILE_NAME = '.surge-vless-bridge.json';
 export const HOME_CONFIG_FILE_PATH = join('.config', 'surge-vless-bridge', 'config.json');
@@ -139,6 +146,7 @@ export const getDefaultConfig = async (_cwd: string): Promise<CliConfig> => {
     subscriptionNames: [],
     subscriptionOptions: [],
     vlessNodes: [],
+    anytlsSniOverrides: [],
     surgeConfigPath: await detectSurgeConfigPath(),
     singBoxBinary: singBoxBinary.path,
     outputDir: join(stateDir, 'nodes'),
@@ -367,6 +375,7 @@ const mergeConfig = (base: CliConfig, input?: CliConfigInput): CliConfig => {
     subscriptionOptions: normalizedSubscriptions?.map(entry => entry.options) ??
       (base.subscriptionUrls ?? []).map((_, index) => normalizeSubscriptionOptions(sanitizedInput.subscriptionOptions?.[index] ?? base.subscriptionOptions?.[index])),
     vlessNodes: normalizedVlessNodes ?? base.vlessNodes,
+    anytlsSniOverrides: normalizeAnyTlsSniOverrides(sanitizedInput.anytlsSniOverrides ?? base.anytlsSniOverrides),
     policyGroupName,
     policyGroupTargets,
     policyGroupExclusions,

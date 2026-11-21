@@ -1,4 +1,11 @@
+/**
+ * [INPUT]: Source options and URI links with fragment or VMess JSON display names.
+ * [OUTPUT]: Normalized source controls and case-insensitive name filtering.
+ * [POS]: Runtime-neutral source selection used before previews and syncs.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 import type { CliConfig, SubscriptionOptions } from '../types/cli-config';
+import { subscriptionNodeName } from '../native/proxy';
 
 export const normalizeSubscriptionOptions = (input?: Partial<SubscriptionOptions>): SubscriptionOptions => ({
   enabled: input?.enabled !== false,
@@ -18,7 +25,7 @@ export const filterSubscriptionNodes = (nodes: string[], options: SubscriptionOp
   const exclude = options.exclude.toLowerCase();
   return nodes.filter(link => {
     let name = '';
-    try { name = decodeURIComponent(new URL(link).hash.slice(1)).toLowerCase(); } catch { return false; }
+    try { name = subscriptionNodeName(link).toLowerCase(); } catch { return false; }
     return (!include || name.includes(include)) && (!exclude || !name.includes(exclude));
   });
 };

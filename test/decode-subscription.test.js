@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: Node test runner and the compiled URI-list envelope decoder.
+ * [OUTPUT]: Plain, Base64 and protocol-independent format boundary regressions.
+ * [POS]: Isolated subscription decoding checks without network access or user data.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
@@ -34,6 +40,15 @@ test('keeps protocols other than VLESS for the caller to filter', () => {
   const decoded = decodeSubscription(base64('hysteria2://x@a.example#H\nvless://u@b.example:443#V'));
   assert.match(decoded, /hysteria2:\/\//);
   assert.match(decoded, /vless:\/\//);
+});
+
+test('decodes AnyTLS and future schemes without a fixed protocol whitelist', () => {
+  for (const scheme of ['anytls', 'hy', 'hysteria2+realm', 'tuic', 'ss', 'future+protocol.v2']) {
+    const raw = `${scheme}://test-only@peer.example:443#Other node\rvless://u@node.example:443#VLESS`;
+    assert.equal(decodeSubscription(raw), raw);
+    assert.equal(decodeSubscription(base64(raw)), raw);
+  }
+  assert.throws(() => decodeSubscription(base64('# vless://u@node.example:443\nError: subscription expired')));
 });
 
 test('rejects an empty response', () => {

@@ -1,0 +1,83 @@
+/*
+ * [INPUT]: data-theme from theme.js before the first renderer paint.
+ * [OUTPUT]: Semantic colors shared by every component and native form control.
+ * [POS]: Theme palette; styles.css owns layout and component states.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
+:root {
+  color-scheme: light;
+  --canvas: #f5f5f7;
+  --surface: #fff;
+  --surface-subtle: #fafafb;
+  --surface-inset: #f0f1f3;
+  --text: #242629;
+  --text-secondary: #5c646b;
+  --text-muted: #656d75;
+  --border: #e4e6e9;
+  --border-strong: #c7cdd2;
+  --accent: #0870df;
+  --accent-hover: #0067d6;
+  --link: #0066cc;
+  --selection: #eef4f8;
+  --selection-border: #658394;
+  --success: #256c48;
+  --success-surface: #edf6f0;
+  --success-border: #a5cdb8;
+  --warning: #89601c;
+  --warning-surface: #fff3dc;
+  --warning-border: #d8bf8a;
+  --danger: #ad3f3b;
+  --danger-surface: #fbefee;
+  --danger-border: #dfb6b3;
+  --on-accent: #fff;
+  --solid: #4d6876;
+  --sidebar: #ebebee;
+  --topbar: rgba(245, 245, 247, .94);
+  --floating: rgba(255, 255, 255, .96);
+  --loading: rgba(245, 245, 247, .97);
+  --hover: rgba(0, 0, 0, .045);
+  --active: rgba(0, 0, 0, .085);
+  --focus: rgba(10, 120, 236, .17);
+  --overlay: rgba(20, 20, 22, .38);
+  --toast: #28343a;
+  --toast-danger: #a33b38;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #1b1d20;
+  --surface: #24272b;
+  --surface-subtle: #292d32;
+  --surface-inset: #31363c;
+  --text: #eceef0;
+  --text-secondary: #bbc1c8;
+  --text-muted: #a3abb4;
+  --border: #373d44;
+  --border-strong: #515a65;
+  --accent: #1675d5;
+  --accent-hover: #1170cf;
+  --link: #83bcff;
+  --selection: #2b3c49;
+  --selection-border: #8ba9bc;
+  --success: #8bd0aa;
+  --success-surface: #233d30;
+  --success-border: #486e58;
+  --warning: #e9bf79;
+  --warning-surface: #403522;
+  --warning-border: #79633d;
+  --danger: #f1a39e;
+  --danger-surface: #452d2e;
+  --danger-border: #84504e;
+  --solid: #425d6c;
+  --sidebar: #202327;
+  --topbar: rgba(27, 29, 32, .94);
+  --floating: rgba(36, 39, 43, .96);
+  --loading: rgba(27, 29, 32, .97);
+  --hover: rgba(255, 255, 255, .055);
+  --active: rgba(255, 255, 255, .1);
+  --focus: rgba(131, 188, 255, .24);
+  --overlay: rgba(0, 0, 0, .62);
+  --toast: #354451;
+}
+
+.theme-changing *, .theme-changing *::before, .theme-changing *::after { transition: none !important; }

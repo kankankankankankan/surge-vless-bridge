@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: VLESS 链接与 Clash 参数解析结果。
+ * [OUTPUT]: TLS、传输层和 VLESS 中间节点类型。
+ * [POS]: 三种运行方式共用的 VLESS 契约，不承载其他协议。
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 export type SingBoxTls = {
   enabled: boolean;
   server_name?: string;

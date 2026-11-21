@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: Renderer commands, bridge configuration and runtime-specific conversion services.
+ * [OUTPUT]: Validated actions, source status, credential-free AnyTLS TLS/reuse settings and scheduler data.
+ * [POS]: Desktop IPC service; routes native multi-protocol and VLESS backend operations.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
@@ -18,6 +24,8 @@ import {
 import { cleanBridge, doctorBridge, rebuildBridge, syncBridge } from '../engines';
 import type { CliConfig, CliConfigInput, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
 import { assertRuntimeModeConfirmed } from '../runtime-mode';
+import { parseNativeProxy, supportsNativeProtocol } from '../native/proxy';
+import { anyTlsEndpointKey, normalizeAnyTlsSniOverrides } from '../native/anytls-sni';
 import { pathExists, readJsonFile, readTextFile, writeTextFile } from '../utils/fs';
 import {
   compareVersions,
@@ -40,6 +48,8 @@ import {
 } from '../mihomo/launch-agent';
 import { readMihomoNodes } from '../mihomo/sync';
 import { diagnoseMihomoNode } from '../mihomo/probe';
+import { findSurgeCli } from '../utils/surge-cli';
+import { diagnoseNativeNode } from './native-probe';
 import { pruneSubscriptionCache, readSubscriptionCache, readSubscriptionStatuses } from '../utils/subscription-cache';
 import { filterSubscriptionNodes, normalizeSubscriptionOptions, subscriptionOptionsForUrl } from '../utils/subscription-options';
 import { withBridgeOperation, withDirectoryLock } from '../utils/operation-lock';
@@ -86,7 +96,7 @@ const defaultDependencies: DesktopServiceDependencies = {
 
 const uniqueLines = (values: string[]) => [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 
-const validateSources = (subscriptionUrls: string[], vlessNodes: string[]) => {
+const validateSources = (subscriptionUrls: string[], vlessNodes: string[], runtimeMode: RuntimeMode) => {
   for (const value of subscriptionUrls) {
     let url: URL;
     try {
@@ -100,10 +110,12 @@ const validateSources = (subscriptionUrls: string[], vlessNodes: string[]) => {
     }
   }
 
-  const invalidNode = vlessNodes.find((value) => !value.startsWith('vless://'));
-  if (invalidNode) {
-    throw new Error('直接节点必须以 vless:// 开头。');
-  }
+  vlessNodes.forEach((value, index) => {
+    if (/^vless:\/\//i.test(value)) return;
+    if (runtimeMode !== 'surge-native') throw new Error('当前外部内核模式仅支持直接 VLESS 节点。');
+    if (!supportsNativeProtocol(value)) throw new Error('该直接节点协议尚未支持 Surge 原生转换。');
+    parseNativeProxy(value, index);
+  });
 };
 
 const captureConsole = async <T>(run: () => Promise<T>) => {
@@ -214,7 +226,7 @@ export class DesktopService {
     const subscriptionNames = subscriptions.map((entry) => entry.name);
     const subscriptionOptions = subscriptions.map(entry => entry.options);
     const vlessNodes = uniqueLines(input.vlessNodes);
-    validateSources(subscriptionUrls, vlessNodes);
+    validateSources(subscriptionUrls, vlessNodes, loaded.config.runtimeMode);
     await withDirectoryLock(join(loaded.config.outputDir, '.subscription-operation.lock'), async () => {
       await this.updateConfig({ subscriptionUrl: '', subscriptionUrls, subscriptionNames, subscriptionOptions, vlessNodes });
       await pruneSubscriptionCache(loaded.config, subscriptionUrls);
@@ -236,6 +248,7 @@ export class DesktopService {
   }
 
   async saveSettings(input: DesktopConfigView) {
+    const anytlsSniOverrides = input.anytlsSniOverrides === undefined ? undefined : normalizeAnyTlsSniOverrides(input.anytlsSniOverrides);
     const portStart = Number(input.portStart);
     const backupKeep = Number(input.backupKeep);
     const connectTimeoutSeconds = Number(input.connectTimeoutSeconds);
@@ -352,6 +365,7 @@ export class DesktopService {
     const loaded = await this.loadConfig();
     await this.updateConfig({
       surgeConfigPath: input.surgeConfigPath.trim(),
+      anytlsSniOverrides: anytlsSniOverrides ?? loaded.config.anytlsSniOverrides,
       singBoxBinary: input.singBoxBinary.trim(),
       mihomo: {
         ...loaded.config.mihomo,
@@ -426,11 +440,36 @@ export class DesktopService {
     if (!config.surgeConfigPath) return 0;
     const profile = await readTextFile(config.surgeConfigPath).catch(() => '');
     const block = profile.match(/# vless start([\s\S]*?)# vless end/);
-    return block?.[1]?.split('\n').filter((line) => /^\s*[^#].*=\s*vless\s*,/i.test(line)).length ?? 0;
+    return block?.[1]?.split('\n').filter((line) => /^\s*[^#].*=\s*(?:vless|ss|vmess|trojan|anytls|hysteria2|tuic(?:-v5)?)\s*,/i.test(line)).length ?? 0;
   }
 
   private async countMihomoNodes(config: CliConfig) {
     return (await readMihomoNodes(config).catch(() => [])).length;
+  }
+
+  private async listDiagnosticNodes(config: CliConfig): Promise<Array<{ name: string; port: number; policy?: string }>> {
+    if (config.runtimeMode === 'mihomo') {
+      return readMihomoNodes(config).then(nodes => nodes.map(({ name, port }) => ({ name, port }))).catch(() => []);
+    }
+    if (config.runtimeMode === 'external') {
+      const entries = await readdir(config.outputDir).catch(() => []);
+      const nodes: Array<{ name: string; port: number }> = [];
+      for (const entry of entries.filter(value => /^sing-box\[\d+\]\.json$/.test(value))) {
+        try {
+          const document = JSON.parse(await readTextFile(join(config.outputDir, entry))) as { outbounds?: Array<{ tag?: string }>; inbounds?: Array<{ listen_port?: number }> };
+          const name = document.outbounds?.[0]?.tag;
+          const port = document.inbounds?.[0]?.listen_port;
+          if (name && typeof port === 'number' && Number.isInteger(port)) nodes.push({ name, port });
+        } catch { /* Ignore incomplete staging files. */ }
+      }
+      return nodes;
+    }
+    const profile = await readTextFile(config.surgeConfigPath).catch(() => '');
+    const block = profile.match(/# vless start([\s\S]*?)# vless end/)?.[1] ?? '';
+    return block.split('\n').flatMap((line, index) => {
+      const match = line.match(/^\s*(.*?)\s*=\s*(?:vless|ss|vmess|trojan|anytls|hysteria2|tuic(?:-v5)?)\s*,/i);
+      return match?.[1]?.trim() ? [{ name: match[1].trim(), port: -(index + 1), policy: match[1].trim() }] : [];
+    });
   }
 
   private async singBoxStatus(binaryPath: string, includeLatest = false) {
@@ -485,6 +524,29 @@ export class DesktopService {
     };
   }
 
+  private async listAnyTlsNodes(config: CliConfig) {
+    if (config.runtimeMode !== 'surge-native') return [];
+    const urls = [config.subscriptionUrl, ...(config.subscriptionUrls ?? [])].filter((value): value is string => Boolean(value));
+    const cached = await Promise.all(urls.map(async url => {
+      const options = subscriptionOptionsForUrl(config, url);
+      const cache = options.enabled ? await readSubscriptionCache(config, url) : undefined;
+      return cache ? filterSubscriptionNodes(cache.nodes, options) : [];
+    }));
+    const nodes = new Map<string, DesktopState['anytlsNodes'][number]>();
+    for (const link of [...cached.flat(), ...(config.vlessNodes ?? [])]) {
+      if (!/^anytls:\/\//i.test(link)) continue;
+      try {
+        const node = parseNativeProxy(link, 0);
+        nodes.set(anyTlsEndpointKey(node.server, node.server_port), {
+          name: node.tag, server: node.server, port: node.server_port, sourceSni: node.parameters.sni ?? '',
+          sourceCertificateVerifyName: node.parameters['server-cert-verify-name'] ?? '',
+          sourceReuse: node.parameters.reuse !== 'false',
+        });
+      } catch { /* Invalid source nodes are reported by preview and sync. */ }
+    }
+    return [...nodes.values()];
+  }
+
   async getState(): Promise<DesktopState> {
     const loaded = await this.loadConfig();
     const [
@@ -502,6 +564,7 @@ export class DesktopService {
       mihomoLogs,
       subscriptionStatuses,
       diagnosticNodes,
+      anytlsNodes,
     ] = await Promise.all([
       this.singBoxStatus(loaded.config.singBoxBinary),
       this.mihomoStatus(loaded.config.mihomo.binary),
@@ -523,9 +586,8 @@ export class DesktopService {
         readLogTail(join(loaded.config.mihomo.dataDir, 'logs', 'mihomo-error.log'), 32 * 1024),
       ]),
       readSubscriptionStatuses(loaded.config, [loaded.config.subscriptionUrl, ...(loaded.config.subscriptionUrls ?? [])].filter((value): value is string => Boolean(value))),
-      loaded.config.runtimeMode === 'mihomo'
-        ? readMihomoNodes(loaded.config).then(nodes => nodes.map(({ name, port }) => ({ name, port }))).catch(() => [])
-        : Promise.resolve([]),
+      this.listDiagnosticNodes(loaded.config),
+      this.listAnyTlsNodes(loaded.config),
     ]);
 
     return {
@@ -548,6 +610,7 @@ export class DesktopService {
           ...(loaded.config.subscriptionUrls ?? []).map((_, index) => normalizeSubscriptionOptions(loaded.config.subscriptionOptions?.[index])),
         ],
         vlessNodes: loaded.config.vlessNodes ?? [],
+        anytlsSniOverrides: loaded.config.anytlsSniOverrides,
         surgeConfigPath: loaded.config.surgeConfigPath,
         singBoxBinary: loaded.config.singBoxBinary,
         mihomoBinary: loaded.config.mihomo.binary,
@@ -583,6 +646,7 @@ export class DesktopService {
       nodeCount,
       subscriptionStatuses,
       diagnosticNodes,
+      anytlsNodes,
       backups: backups.slice(0, 20),
       history,
       schedule,
@@ -805,17 +869,24 @@ export class DesktopService {
     return (await this.mihomoStatus(loaded.config.mihomo.binary, true)).status;
   }
 
-  async diagnoseNode(input: { port: number; name: string }) {
+  async diagnoseNode(input: { port: number; name: string; policy?: string }) {
     if (this.operationRunning) throw new Error('已有一个任务正在执行。');
     this.operationRunning = true;
     try {
       const { config } = await this.loadConfig();
       assertRuntimeModeConfirmed(config);
-      if (config.runtimeMode !== 'mihomo') throw new Error('节点诊断目前用于 Mihomo 后端。');
       return await withBridgeOperation(config, async () => {
-        const nodes = await readMihomoNodes(config);
-        if (!input || !Number.isInteger(input.port) || !nodes.some(node => node.port === input.port && node.name === input.name)) throw new Error('节点已变化，请刷新后重试。');
-        return diagnoseMihomoNode({ port: input.port, udpEnabled: config.udpRelay, udpTarget: config.udpTestTarget });
+        if (!input || !Number.isInteger(input.port) || typeof input.name !== 'string') throw new Error('节点已变化，请刷新后重试。');
+        const nodes = await this.listDiagnosticNodes(config);
+        const node = nodes.find(entry => entry.port === input.port && entry.name === input.name);
+        if (!input || !node) throw new Error('节点已变化，请刷新后重试。');
+        if (config.runtimeMode !== 'surge-native') {
+          return diagnoseMihomoNode({ port: input.port, udpEnabled: config.udpRelay, udpTarget: config.udpTestTarget });
+        }
+        const policy = node.policy || node.name;
+        const cli = await findSurgeCli();
+        if (!cli) throw new Error('未找到 Surge CLI，无法测试原生策略。');
+        return diagnoseNativeNode({ cli, policy, cwd: dirname(config.surgeConfigPath) });
       });
     } finally { this.operationRunning = false; }
   }
@@ -931,7 +1002,7 @@ export class DesktopService {
           runtimeModeConfirmed: true,
           mihomo: confirmedConfig.mihomo,
         });
-        const message = `已选择 ${targetMode === 'mihomo' ? 'Mihomo 网关' : targetMode === 'surge-native' ? 'Surge 原生 VLESS' : 'sing-box External'}。`;
+        const message = `已选择 ${targetMode === 'mihomo' ? 'Mihomo 网关' : targetMode === 'surge-native' ? 'Surge 原生' : 'sing-box External'}。`;
         await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message });
         return { success: true, message, output: message };
       } catch (error) {
@@ -969,7 +1040,7 @@ export class DesktopService {
       const result = await this.dependencies.switchSync(targetConfig);
       await this.updateConfig({ runtimeMode: targetMode, runtimeModeConfirmed: true, mihomo: targetConfig.mihomo });
       if (targetMode === 'external' || targetMode === 'surge-native') await this.dependencies.stopMihomoService({ uninstall: true });
-      const message = `运行引擎已切换为 ${targetMode === 'mihomo' ? 'Mihomo 网关' : targetMode === 'surge-native' ? 'Surge 原生 VLESS' : 'sing-box External'}。`;
+      const message = `运行引擎已切换为 ${targetMode === 'mihomo' ? 'Mihomo 网关' : targetMode === 'surge-native' ? 'Surge 原生' : 'sing-box External'}。`;
       await recordActivity(this.historyPath, { action: 'switch-engine', success: true, message, output: message, count: result.count });
       return { success: true, message, output: message, count: result.count };
     } catch (error) {

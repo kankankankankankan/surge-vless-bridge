@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: Node tests, isolated desktop services and packaged resource contracts.
+ * [OUTPUT]: Desktop command, scheduler, installer and renderer boundary regressions.
+ * [POS]: Tests desktop IPC behavior without changing live profiles or user schedules.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 const assert = require('node:assert/strict');
 const { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } = require('node:fs/promises');
 const os = require('node:os');
@@ -17,6 +23,25 @@ const { renderLaunchAgentPlist } = require('../dist/desktop/scheduler.js');
 const { readLogTail } = require('../dist/desktop/storage.js');
 const { assertRuntimeModeConfirmed } = require('../dist/runtime-mode.js');
 const { PROFILE_TEXT, subscriptionUrl, vlessLink } = require('./helpers.js');
+
+test('native diagnostics use the verified managed policy and reject missing node input', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'svb-diagnostic-policy-'));
+  t.after(() => require('node:fs/promises').rm(root, { recursive: true, force: true }));
+  const configPath = path.join(root, 'config.json');
+  await writeFile(configPath, JSON.stringify({ runtimeMode: 'surge-native', runtimeModeConfirmed: true,
+    outputDir: path.join(root, 'nodes'), surgeConfigPath: path.join(root, 'profile.conf') }));
+  const service = new DesktopService({ configPath, executablePath: process.execPath, scheduledEntryPath: 'fixture.js' });
+  t.mock.method(service, 'listDiagnosticNodes', async () => [{ port: -1, name: 'Managed', policy: 'Managed' }]);
+  t.mock.method(require('../dist/utils/surge-cli.js'), 'findSurgeCli', async () => 'fixture-cli');
+  let actualPolicy;
+  t.mock.method(require('../dist/desktop/native-probe.js'), 'diagnoseNativeNode', async ({ policy }) => {
+    actualPolicy = policy;
+    return { testedAt: '', tcp: {}, udp: {} };
+  });
+  await service.diagnoseNode({ port: -1, name: 'Managed', policy: 'Unmanaged' });
+  assert.equal(actualPolicy, 'Managed');
+  await assert.rejects(service.diagnoseNode(null), /节点已变化/);
+});
 
 test('renders an escaped launchd job for interval schedules', () => {
   const plist = renderLaunchAgentPlist({
@@ -460,6 +485,8 @@ test('desktop policy group controls expose bulk selection and task-specific work
   assert.match(html, /id="connect-timeout-enabled" type="checkbox"/);
   assert.match(html, /id="connect-timeout-seconds" type="number"/);
   assert.match(app, /updateConnectionOptionFields/);
+  assert.match(app, /Math\.round\(numeric\)/);
+  assert.match(app, /未主动测试/);
 });
 
 test('desktop package collects renderer assets from stable source paths', async () => {
@@ -472,7 +499,7 @@ test('desktop package collects renderer assets from stable source paths', async 
   assert.deepEqual(resources[0], {
     from: 'desktop',
     to: 'renderer',
-    filter: ['index.html', 'styles.css', 'app.js', 'boot.js'],
+    filter: ['index.html', 'styles.css', 'app.js', 'boot.js', 'theme.js', 'theme.css', 'assets/engines/**/*'],
   });
   assert.deepEqual(resources[1], {
     from: 'node_modules/lucide/dist/umd/lucide.min.js',
@@ -512,7 +539,7 @@ test('desktop exposes named subscriptions, inline engine switching and install p
   assert.match(html, /id="sing-box-install-progress"/);
   assert.match(html, /id="mihomo-install-progress"/);
   assert.match(html, /data-runtime-mode="surge-native"/);
-  assert.match(html, /Surge 原生 VLESS/);
+  assert.match(html, /Surge 原生/);
   assert.match(html, /<details class="section-block advanced-settings">/);
   assert.match(app, /data-source-name/);
   assert.match(app, /subscriptionNames/);

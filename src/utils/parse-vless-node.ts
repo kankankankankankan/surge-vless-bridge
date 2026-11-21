@@ -1,8 +1,15 @@
+/**
+ * [INPUT]: A VLESS URI and its source position.
+ * [OUTPUT]: The shared VLESS outbound model with TLS and transport parameters.
+ * [POS]: VLESS-only parser; other schemes must use their own protocol converter.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 import type { SingBoxVlessOutbound } from '../types/sing-box-vless-outbound';
 import { toBoolean } from './base';
 
 export const parseVlessNode = (node: string, index: number): SingBoxVlessOutbound => {
   const url = new URL(node);
+  if (url.protocol !== 'vless:') throw new Error(`Expected a vless:// node at index ${index + 1}.`);
   const uuid = decodeURIComponent(url.username);
   // `URL` returns IPv6 hosts bracketed (`[2001:db8::1]`), but every consumer wants the bare address:
   // sing-box reads `server` as an IP or a domain, and a bracketed value parses as neither.
@@ -10,7 +17,7 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
   const port = Number(url.port || '443');
 
   if (!uuid || !host || Number.isNaN(port)) {
-    throw new Error(`Invalid vless node at index ${index + 1}: ${node}`);
+    throw new Error(`Invalid vless node at index ${index + 1}.`);
   }
 
   const params = url.searchParams;
@@ -63,7 +70,8 @@ export const parseVlessNode = (node: string, index: number): SingBoxVlessOutboun
     outbound.tls = {
       enabled: true,
       insecure: toBoolean(insecure),
-      alpn: params.has('alpn') ? (params.get('alpn') ?? '').split(',').filter(Boolean) : ['http/1.1'],
+      alpn: params.has('alpn') ? (params.get('alpn') ?? '').split(',').filter(Boolean)
+        : type === 'grpc' ? ['h2'] : ['xhttp', 'splithttp'].includes(type) ? [] : ['http/1.1'],
       ...(certificateFingerprint ? { certificate_fingerprint_sha256: certificateFingerprint } : {}),
       ...(certificateVerifyName ? { certificate_verify_name: certificateVerifyName } : {}),
     };

@@ -1,11 +1,19 @@
+/**
+ * [INPUT]: Desktop preload API, runtime state and bundled renderer controls.
+ * [OUTPUT]: Source editing, previews, runtime selection, per-node AnyTLS TLS/reuse and operation feedback.
+ * [POS]: Renderer interaction layer; never downloads subscriptions or writes profiles directly.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 const api = window.surgeBridge;
 const STARTUP_TIMEOUT_MS = 12000;
 
 const pageMeta = {
   overview: ['概览', '从节点来源到自动同步的完整流程'],
-  sources: ['订阅与节点', '逐项管理并验证节点来源'],
+  diagnostics: ['节点诊断', '按当前运行引擎测试节点连通性'],
+  'policy-groups': ['策略组', '选择要加入 VLESS 节点的 Surge 策略组'],
+  sources: ['来源与节点', '逐项管理并验证订阅和直接节点'],
   schedule: ['定时任务', '配置 macOS 后台自动同步'],
-  history: ['历史与备份', '查看结果并恢复 Surge 配置'],
+  history: ['历史与恢复', '查看结果、日志并恢复 Surge 配置'],
   settings: ['设置', '配置路径与生成选项'],
 };
 
@@ -28,7 +36,7 @@ const labelMap = {
   'surge-http-api': 'Surge 重载',
   'auto-reload': 'Surge 重载',
   ports: '本地端口',
-  'surge-native': 'Surge 原生 VLESS',
+  'surge-native': 'Surge 原生',
 };
 
 const actionMap = {
@@ -333,7 +341,7 @@ const applyInteractionLocks = () => {
 
 const switchView = (view) => {
   activeView = view;
-  $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.view === view));
+  $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.view === view && !item.dataset.anchor));
   $$('.view').forEach((item) => item.classList.toggle('active', item.id === `view-${view}`));
   $('#page-title').textContent = pageMeta[view][0];
   $('#page-subtitle').textContent = pageMeta[view][1];
@@ -393,7 +401,16 @@ const setWorkflowState = (name, status, detail) => {
 
 const renderDiagnostics = () => {
   const nodes = state.diagnosticNodes || [];
-  $('#node-diagnostics').classList.toggle('hidden', state.config.runtimeMode !== 'mihomo');
+  $('#node-diagnostics').classList.toggle('hidden', !state.runtimeModeConfirmed);
+  $('#diagnostics-nav').classList.toggle('hidden', !state.runtimeModeConfirmed);
+  const labels = {
+    external: ['sing-box External 节点诊断', '测试本机 External listener 到目标的 TCP/UDP 链路。'],
+    mihomo: ['Mihomo 节点诊断', '测试本机 Mihomo listener 到目标的 TCP/UDP 链路。'],
+    'surge-native': ['Surge 原生节点诊断', '通过 Surge 测试当前策略的 HTTP 与 UDP 连通性。旧版 Surge 不支持 UDP 测试时会单独提示。'],
+  };
+  const [title, subtitle] = labels[state.config.runtimeMode] || ['节点连通诊断', '测试当前运行引擎到目标的链路。'];
+  $('#diagnostic-title').textContent = title;
+  $('#diagnostic-subtitle').textContent = subtitle;
   for (const [port, name] of diagnosticSelected) if (!nodes.some(node => node.port === port && node.name === name)) diagnosticSelected.delete(port);
   for (const [port, result] of diagnosticResults) if (!nodes.some(node => node.port === port && node.name === result.name)) diagnosticResults.delete(port);
   $('#diagnostic-empty').classList.toggle('hidden', nodes.length > 0);
@@ -408,12 +425,18 @@ const renderDiagnostics = () => {
   const visible = nodes.filter(node => node.name.toLocaleLowerCase().includes(query));
   const focusedPort = document.activeElement?.dataset.diagnosticPort;
   const expanded = new Set($$('#diagnostic-list details[open]').map(details => details.closest('[data-diagnostic-row]').dataset.diagnosticRow));
-  const summary = (part, protocol) => part ? `${protocol} ${part.skipped ? '未检测' : part.success ? `通过 · ${part.latencyMs} ms` : '失败'}` : `${protocol} 未检测`;
+  const formatLatencyMs = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? `${Math.max(0, Math.round(numeric))} ms` : '-';
+  };
+  const summary = (part, protocol) => part
+    ? `${protocol} ${part.skipped ? (part.target === '-' ? '未主动测试' : '未检测') : part.success ? `通过 · ${formatLatencyMs(part.latencyMs)}` : '失败'}`
+    : `${protocol} 未检测`;
   const outcomeClass = part => !part || part.skipped ? '' : part.success ? 'status-success' : 'status-warning';
   $('#diagnostic-list').innerHTML = visible.map(node => {
     const result = diagnosticResults.get(node.port);
     const detail = result?.error || (result ? `${formatDate(result.testedAt)}\nTCP: ${result.tcp.detail} · ${result.tcp.target}\nUDP: ${result.udp.detail} · ${result.udp.target}` : '');
-    return `<div class="diagnostic-node-row" data-diagnostic-row="${node.port}"><label><input type="checkbox" data-diagnostic-port="${node.port}" ${diagnosticSelected.has(node.port) ? 'checked' : ''} ${busy ? 'disabled' : ''} /><span>${escapeHtml(node.name)}</span></label><span class="diagnostic-outcome ${result?.error ? 'status-warning' : outcomeClass(result?.tcp)}">${escapeHtml(result?.error ? '检测失败' : summary(result?.tcp, 'TCP'))}</span><span class="diagnostic-outcome ${outcomeClass(result?.udp)}">${escapeHtml(summary(result?.udp, 'UDP'))}</span>${detail ? `<details ${expanded.has(String(node.port)) ? 'open' : ''}><summary>检测详情</summary><p>${escapeHtml(detail)}</p></details>` : ''}</div>`;
+    return `<div class="diagnostic-node-row" data-diagnostic-row="${node.port}"><label><input type="checkbox" data-diagnostic-port="${node.port}" data-diagnostic-policy="${escapeHtml(node.policy || '')}" ${diagnosticSelected.has(node.port) ? 'checked' : ''} ${busy ? 'disabled' : ''} /><span>${escapeHtml(node.name)}</span></label><span class="diagnostic-outcome ${result?.error ? 'status-warning' : outcomeClass(result?.tcp)}">${escapeHtml(result?.error ? '检测失败' : summary(result?.tcp, 'TCP'))}</span><span class="diagnostic-outcome ${outcomeClass(result?.udp)}">${escapeHtml(summary(result?.udp, 'UDP'))}</span>${detail ? `<details ${expanded.has(String(node.port)) ? 'open' : ''}><summary>检测详情</summary><p>${escapeHtml(detail)}</p></details>` : ''}</div>`;
   }).join('') || (nodes.length ? '<p class="form-meta">没有匹配的节点。</p>' : '');
   if (focusedPort) $(`[data-diagnostic-port="${focusedPort}"]`)?.focus({ preventScroll: true });
 };
@@ -428,7 +451,7 @@ const renderTrafficFlow = () => {
   const note = $('#traffic-flow-note');
   if (!backend || !status || !subtitle || !note) return;
   backend.classList.toggle('mihomo', mihomo);
-  backend.querySelector('strong').textContent = mihomo ? 'Mihomo' : native ? 'Surge 原生 VLESS' : 'sing-box External';
+  backend.querySelector('strong').textContent = mihomo ? 'Mihomo' : native ? 'Surge 原生' : 'sing-box External';
   backend.querySelector('small').textContent = mihomo ? '单进程 + 本机 listeners' : native ? 'Surge 原生节点' : '按节点启动 External';
   if (mihomo) {
     const listenerCount = state.diagnosticNodes?.length || state.nodeCount;
@@ -442,7 +465,7 @@ const renderTrafficFlow = () => {
   } else if (native) {
     status.textContent = '原生运行';
     status.className = 'flow-status ready';
-    subtitle.textContent = 'Surge 直接承载 VLESS 节点，不启动外部内核进程。';
+    subtitle.textContent = 'Surge 直接承载 VLESS、AnyTLS、SS、VMess、Trojan、Hysteria2 和 TUIC 节点。';
     note.textContent = '原生模式依赖 Surge Mac 6.12.0 或更高版本，节点参数直接写入 [Proxy]。';
   } else {
     status.textContent = '按需启动';
@@ -491,7 +514,7 @@ const renderOverview = () => {
   setWorkflowState(
     'environment',
     environmentReady ? 'done' : sourceReady ? 'current' : 'blocked',
-    environmentReady ? `Surge 与 ${native ? '原生 VLESS' : state.config.runtimeMode === 'mihomo' ? 'Mihomo' : 'sing-box'} 已就绪` : `${state.doctor.failures} 项需要处理`,
+    environmentReady ? `Surge 与 ${native ? '原生协议' : state.config.runtimeMode === 'mihomo' ? 'Mihomo' : 'sing-box'} 已就绪` : `${state.doctor.failures} 项需要处理`,
   );
   setWorkflowState(
     'preview',
@@ -500,7 +523,7 @@ const renderOverview = () => {
   );
 
   const activeDependency = state.config.runtimeMode === 'mihomo' ? state.environment.mihomo : state.environment.singBox;
-  $('#engine-summary-name').textContent = `${native ? 'Surge 原生 VLESS' : state.config.runtimeMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}${runtimeModeConfirmed ? '' : '（待确认）'}`;
+  $('#engine-summary-name').textContent = `${native ? 'Surge 原生' : state.config.runtimeMode === 'mihomo' ? 'Mihomo 网关' : 'sing-box External'}${runtimeModeConfirmed ? '' : '（待确认）'}`;
   $('#engine-summary-version').textContent = native ? 'Surge 6.12.0+' : activeDependency.currentVersion ? `v${activeDependency.currentVersion}` : '未识别';
   $('#engine-summary-service').textContent =
     state.config.runtimeMode === 'mihomo'
@@ -680,7 +703,7 @@ const renderSetupReview = () => {
   const engine = onboardingDraftMode === 'mihomo'
     ? 'Mihomo 网关'
     : onboardingDraftMode === 'surge-native'
-      ? 'Surge 原生 VLESS'
+      ? 'Surge 原生'
       : 'sing-box External';
   const sourceSummary = `${sources.subscriptionUrls.length} 个订阅，${sources.vlessNodes.length} 个直接节点`;
   const options = [
@@ -766,11 +789,11 @@ const renderEngineOnboarding = () => {
 };
 
 const sourceDescription = (value, kind) => {
-  if (!value) return kind === 'subscription' ? '等待填写订阅地址' : '等待填写 VLESS 节点';
+  if (!value) return kind === 'subscription' ? '等待填写订阅地址' : '等待填写代理节点';
   try {
     const url = new URL(value);
     if (kind === 'subscription') return url.hostname || '本地数据订阅';
-    return decodeURIComponent(url.hash.slice(1)) || url.hostname || 'VLESS 节点';
+    return decodeURIComponent(url.hash.slice(1)) || '代理节点';
   } catch {
     return '地址格式待确认';
   }
@@ -778,7 +801,7 @@ const sourceDescription = (value, kind) => {
 
 const renderSourceList = (container, values, kind, names = []) => {
   if (values.length === 0) {
-    container.innerHTML = `<button type="button" class="source-empty" data-source-add="${kind}"><i data-lucide="plus-circle"></i><strong>${kind === 'subscription' ? '添加第一个订阅' : '添加直接节点'}</strong><span>${kind === 'subscription' ? '支持 HTTP、HTTPS 和 data 地址' : '粘贴一个完整的 vless:// 地址'}</span></button>`;
+    container.innerHTML = `<button type="button" class="source-empty" data-source-add="${kind}"><i data-lucide="plus-circle"></i><strong>${kind === 'subscription' ? '添加第一个订阅' : '添加直接节点'}</strong><span>${kind === 'subscription' ? '支持 HTTP、HTTPS 和 data 地址' : state.config.runtimeMode === 'surge-native' ? '粘贴 VLESS、AnyTLS、SS 等分享链接' : '粘贴一个完整的 vless:// 地址'}</span></button>`;
     return;
   }
 
@@ -806,6 +829,11 @@ const renderSourceMeta = () => {
 };
 
 const renderSources = () => {
+  const native = state.config.runtimeMode === 'surge-native';
+  $('#direct-node-title').textContent = native ? '直接代理节点' : '直接 VLESS 节点';
+  $('#source-protocol-hint').textContent = native
+    ? 'Surge 原生支持 VLESS、AnyTLS、SS、VMess、Trojan、Hysteria2、TUIC。无法转换的节点会显示兼容提示。'
+    : '当前外部内核模式提取 VLESS 节点；混合订阅中的其他协议会显示未导入提示。';
   $('#subscription-statuses').innerHTML = (state.subscriptionStatuses || []).map((status, index) => {
     if (!status || sourcesDirty) return '';
     const name = state.config.subscriptionNames[index] || `订阅 ${index + 1}`;
@@ -816,7 +844,8 @@ const renderSources = () => {
       : `${status.count} 个节点 · 更新于 ${formatDate(status.lastSuccessAt)}`;
     const filters = status.filteredCount ? ` · 筛除 ${status.filteredCount} 个` : '';
     const skipped = status.skippedCount ? `<details class="status-warning"><summary>跳过 ${status.skippedCount} 个不支持的节点</summary><ul>${(status.skippedReasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul></details>` : '';
-    return `<p class="${status.state === 'fresh' ? '' : 'status-warning'}"><strong>${escapeHtml(name)}</strong> ${escapeHtml(description + filters)}</p>${skipped}`;
+    const notices = status.notices?.length ? `<details class="status-warning"><summary>兼容提示（${status.notices.length}）</summary><ul>${status.notices.map(message => `<li>${escapeHtml(message)}</li>`).join('')}</ul></details>` : '';
+    return `<p class="${status.state === 'fresh' ? '' : 'status-warning'}"><strong>${escapeHtml(name)}</strong> ${escapeHtml(description + filters)}</p>${skipped}${notices}`;
   }).join('');
   renderSourceList($('#subscription-list'), sourceDraft.subscriptionUrls, 'subscription', sourceDraft.subscriptionNames);
   renderSourceList($('#vless-node-list'), sourceDraft.vlessNodes, 'vless');
@@ -938,6 +967,30 @@ const renderHistory = () => {
     $('#output-title').textContent = '选择一条历史记录';
     $('#action-output').textContent = '暂无输出';
   }
+  $('#history-scheduler-log').textContent = state.schedulerLog?.trim() || '暂无日志';
+  $('#history-mihomo-output').textContent = state.mihomoLogs?.output?.trim() || '暂无日志';
+  $('#history-mihomo-error').textContent = state.mihomoLogs?.error?.trim() || '暂无日志';
+};
+
+const diagnosticReport = async () => {
+  const version = await api.getVersion().catch(() => 'unknown');
+  return JSON.stringify({
+    appVersion: version,
+    runtimeMode: state.config.runtimeMode,
+    runtimeModeConfirmed: state.runtimeModeConfirmed,
+    nodeCount: state.nodeCount,
+    sources: state.subscriptionStatuses.map(status => status ? { state: status.state, count: status.count, skippedCount: status.skippedCount ?? 0 } : { state: 'unknown' }),
+    scheduleEnabled: state.schedule.enabled,
+    profileCount: state.profiles.length,
+    policyGroupCount: state.policyGroups.length,
+    doctor: { failures: state.doctor.failures, warnings: state.doctor.warnings },
+    dependencies: {
+      singBox: state.environment.singBox.currentVersion || 'not-installed',
+      mihomo: state.environment.mihomo.currentVersion || 'not-installed',
+      mihomoRunning: state.environment.mihomoService.running,
+    },
+    generatedAt: new Date().toISOString(),
+  }, null, 2);
 };
 
 const selectedPolicyGroupNames = () =>
@@ -1040,6 +1093,11 @@ const renderSettings = () => {
   engineDraftMode = config.runtimeMode;
   $('#config-path-label').textContent = state.configPath;
   $('#surge-config-path').value = config.surgeConfigPath;
+  const profileSelect = $('#surge-profile-select');
+  profileSelect.innerHTML = state.profiles.length
+    ? `<option value="">选择最近发现的配置</option>${state.profiles.map(profile => `<option value="${escapeHtml(profile.path)}">${escapeHtml(profile.path.split('/').pop() || profile.path)} · ${escapeHtml(formatDate(profile.modifiedAt))}</option>`).join('')}`
+    : '<option value="">没有自动发现的配置</option>';
+  profileSelect.value = state.profiles.some(profile => profile.path === config.surgeConfigPath) ? config.surgeConfigPath : '';
   $('#sing-box-binary').value = config.singBoxBinary;
   $('#mihomo-binary').value = config.mihomoBinary;
   $('#mihomo-data-dir').value = config.mihomoDataDir;
@@ -1081,6 +1139,7 @@ const renderSettings = () => {
   $('#connect-timeout-enabled').checked = config.connectTimeoutEnabled;
   $('#connect-timeout-seconds').value = String(config.connectTimeoutSeconds);
   $('#subscription-proxy-url').value = config.subscriptionProxyUrl;
+  renderAnyTlsSniSettings();
   $('#mihomo-log-output').textContent = state.mihomoLogs?.output || '暂无标准输出日志';
   $('#mihomo-log-error').textContent = state.mihomoLogs?.error || '暂无错误日志';
   renderSingBoxDependency();
@@ -1089,6 +1148,33 @@ const renderSettings = () => {
   updateResolverFields();
   updateMihomoDnsFields();
   updateConnectionOptionFields();
+};
+
+const renderAnyTlsSniSettings = () => {
+  const endpointKey = (server, port) => {
+    const raw = server.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    let canonical = raw;
+    try { canonical = new URL(`http://${raw.includes(':') ? `[${raw}]` : raw}/`).hostname; } catch { /* Keep unsupported legacy host labels visible. */ }
+    return JSON.stringify([canonical, port]);
+  };
+  const nodes = new Map((state.anytlsNodes ?? []).map(node => [endpointKey(node.server, node.port), node]));
+  const overrides = state.config.anytlsSniOverrides ?? [];
+  for (const entry of overrides) {
+    const key = endpointKey(entry.server, entry.port);
+    if (!nodes.has(key)) nodes.set(key, { ...entry, name: '已保存的节点', sourceSni: '', inactive: true });
+  }
+  $('#anytls-sni-list').innerHTML = nodes.size ? [...nodes].map(([key, node], index) => {
+    const saved = overrides.find(entry => endpointKey(entry.server, entry.port) === key);
+    const id = `anytls-sni-${index}`;
+    return `<div class="anytls-sni-row">
+      <div class="anytls-sni-node"><strong>${escapeHtml(node.name)}</strong><span>${escapeHtml(node.server)}:${node.port}</span><small>${node.inactive ? '当前来源中未找到此端点；清空名称并恢复跟随订阅可删除设置。' : `订阅 SNI：${escapeHtml(node.sourceSni || '未指定，使用节点地址')}`}</small>${node.inactive ? '' : `<small>订阅证书校验名称：${escapeHtml(node.sourceCertificateVerifyName || '未指定，跟随 SNI')}</small>`}</div>
+      <div class="anytls-tls-fields">
+        <label class="field" for="${id}"><span>SNI 域名</span><input id="${id}" type="text" data-anytls-server="${escapeHtml(node.server)}" data-anytls-port="${node.port}" value="${escapeHtml(saved?.sni ?? '')}" placeholder="留空跟随订阅" spellcheck="false" autocapitalize="off" autocomplete="off" /></label>
+        <label class="field" for="${id}-verify"><span>证书校验名称</span><input id="${id}-verify" type="text" value="${escapeHtml(saved?.certificateVerifyName ?? '')}" placeholder="留空跟随订阅" spellcheck="false" autocapitalize="off" autocomplete="off" /><small class="field-help">仅当服务商要求校验名称与 SNI 分开时填写。需要 Surge Mac 6.8.0+。</small></label>
+        <label class="field" for="${id}-reuse"><span>连接复用</span><select id="${id}-reuse"><option value="">跟随订阅${node.inactive ? '' : `（${node.sourceReuse === false ? '关闭' : '开启'}）`}</option><option value="true" ${saved?.reuse === true ? 'selected' : ''}>开启</option><option value="false" ${saved?.reuse === false ? 'selected' : ''}>关闭</option></select></label>
+      </div>
+    </div>`;
+  }).join('') : '<p class="field-help">尚未识别到 AnyTLS 节点。请先保存订阅并预览更新，再回到此处设置。</p>';
 };
 
 const updateEngineFields = () => {
@@ -1102,7 +1188,23 @@ const updateEngineFields = () => {
   $('#external-resolver-settings').classList.toggle('hidden', engineDraftMode !== 'external');
   $('#external-connect-timeout-setting').classList.toggle('hidden', engineDraftMode !== 'external');
   $('#connect-timeout-field').classList.toggle('hidden', engineDraftMode !== 'external');
+  $('#port-start-field').classList.toggle('hidden', engineDraftMode === 'surge-native');
+  $('#udp-test-option').classList.toggle('hidden', engineDraftMode === 'surge-native');
+  $('#udp-test-target-field').classList.toggle('hidden', engineDraftMode === 'surge-native' || !$('#udp-test-enabled').checked);
+  const udpLabel = $('#udp-relay-option span');
+  const udpHelp = $('#udp-relay-help');
+  if (engineDraftMode === 'mihomo') {
+    udpLabel.textContent = '为 Mihomo 节点启用 UDP 转发';
+    udpHelp.textContent = '写入 Mihomo 节点的 udp: true，并供本机 UDP 诊断使用。节点服务端不支持 UDP 时请关闭。';
+  } else if (engineDraftMode === 'surge-native') {
+    udpLabel.textContent = '为原生 SS 策略启用 UDP 转发';
+    udpHelp.textContent = '仅对原生 SS 有效。VLESS、AnyTLS、Hysteria2 和 TUIC 由协议自身提供 UDP 能力。';
+  } else {
+    udpLabel.textContent = '为 sing-box External 节点启用 UDP 转发';
+    udpHelp.textContent = '写入 Surge external 的 udp-relay=true，用于游戏、QUIC 和实时通话。节点服务端不支持 UDP 时请关闭。';
+  }
   $('#mihomo-settings').classList.toggle('hidden', engineDraftMode !== 'mihomo');
+  $('#anytls-sni-settings').classList.toggle('hidden', engineDraftMode !== 'surge-native');
   const changed = engineDraftMode !== state.config.runtimeMode;
   const switchButton = $('#confirm-engine-switch');
   switchButton.classList.toggle('hidden', !changed);
@@ -1110,7 +1212,7 @@ const updateEngineFields = () => {
   switchButton.querySelector('span').textContent = engineDraftMode === 'mihomo'
     ? '确认切换到 Mihomo'
     : engineDraftMode === 'surge-native'
-      ? '确认切换到原生 VLESS'
+      ? '确认切换到 Surge 原生'
       : '确认切换到 External';
   $('#engine-change-summary').textContent = changed
     ? engineDraftMode === 'mihomo'
@@ -1118,21 +1220,24 @@ const updateEngineFields = () => {
         ? '确认后会先保存当前设置，校验 Mihomo 配置，启动后台服务，再将 Surge 节点切换为 SOCKS5。失败时保留 External。'
         : '请先在下方安装或选择 Mihomo，然后确认切换。'
       : engineDraftMode === 'surge-native'
-        ? '确认后会直接把节点转换为 Surge 原生 VLESS，停止已托管的后台内核，并保留当前 Surge 备份。要求 Surge Mac 6.12.0 或更高。'
+        ? '确认后会将支持的订阅节点转换为 Surge 原生策略，停止已托管的后台内核，并保留当前 Surge 备份。VLESS 要求 Surge Mac 6.12.0 或更高。'
         : '确认后会先保存当前设置，恢复 External 节点，再停止 Mihomo 后台服务。失败时恢复 Mihomo 服务。'
     : engineDraftMode === 'mihomo'
       ? 'Surge 连接每个本地 SOCKS5 listener，Mihomo 在后台承载全部 VLESS 节点。'
       : engineDraftMode === 'surge-native'
-        ? 'Surge 直接承载 VLESS 节点，不需要安装或运行外部内核。'
+        ? 'Surge 原生支持 VLESS、AnyTLS、SS、VMess、Trojan、Hysteria2 和 TUIC，不需要外部内核。'
       : 'Surge 为每个节点按需启动独立 sing-box External 进程。';
 };
 
 const updateConnectionOptionFields = () => {
+  const native = engineDraftMode === 'surge-native';
   const udpRelayEnabled = $('#udp-relay').checked;
   const udpTestEnabled = $('#udp-test-enabled');
-  if (!udpRelayEnabled) udpTestEnabled.checked = false;
-  udpTestEnabled.disabled = !udpRelayEnabled;
-  $('#udp-test-target').disabled = !udpRelayEnabled || !udpTestEnabled.checked;
+  if (!udpRelayEnabled && !native) udpTestEnabled.checked = false;
+  udpTestEnabled.disabled = native || !udpRelayEnabled;
+  $('#udp-test-target').disabled = native || !udpRelayEnabled || !udpTestEnabled.checked;
+  $('#udp-test-option').classList.toggle('hidden', native);
+  $('#udp-test-target-field').classList.toggle('hidden', native || !udpTestEnabled.checked);
   $('#connect-timeout-seconds').disabled = !$('#connect-timeout-enabled').checked;
 };
 
@@ -1792,7 +1897,18 @@ const removeSourceRow = (kind, index) => {
   window.lucide?.createIcons();
 };
 
-$$('.nav-item').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+$$('.nav-item').forEach((button) => button.addEventListener('click', () => {
+  if (button.dataset.anchor) {
+    switchView(button.dataset.view);
+    $$('.nav-item').forEach(item => item.classList.toggle('active', item === button));
+    const meta = button.dataset.anchor === 'node-diagnostics' ? pageMeta.diagnostics : pageMeta['policy-groups'];
+    $('#page-title').textContent = meta[0];
+    $('#page-subtitle').textContent = meta[1];
+    requestAnimationFrame(() => $(`#${button.dataset.anchor}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    return;
+  }
+  switchView(button.dataset.view);
+}));
 $$('[data-go]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.go)));
 $$('[data-action]').forEach((button) =>
   button.addEventListener('click', () => {
@@ -1948,6 +2064,9 @@ $('#choose-surge-profile').addEventListener('click', async () => {
   const path = await api.chooseFile('surge-profile');
   if (path) $('#surge-config-path').value = path;
 });
+$('#surge-profile-select').addEventListener('change', (event) => {
+  if (event.target.value) $('#surge-config-path').value = event.target.value;
+});
 $('#choose-sing-box').addEventListener('click', async () => {
   const path = await api.chooseFile('sing-box');
   if (path) $('#sing-box-binary').value = path;
@@ -1996,7 +2115,7 @@ $('#diagnose-node').addEventListener('click', async () => {
       if (diagnosticStopRequested) break;
       $('#diagnostic-progress').textContent = `正在检测 ${completed + 1} / ${nodes.length}：${node.name}`;
       try {
-        const result = await api.diagnoseNode({ port: node.port, name: node.name });
+    const result = await api.diagnoseNode({ port: node.port, name: node.name, policy: node.policy });
         diagnosticResults.set(node.port, { ...result, name: node.name });
         if (result.tcp.success) tcpPassed++;
       } catch (error) {
@@ -2123,6 +2242,14 @@ const settingsPayloadFromForm = () => {
     connectTimeoutEnabled: $('#connect-timeout-enabled').checked,
     connectTimeoutSeconds: Number($('#connect-timeout-seconds').value),
     subscriptionProxyUrl: $('#subscription-proxy-url').value,
+    anytlsSniOverrides: $$('[data-anytls-server]').flatMap(input => {
+      const certificateVerifyName = document.getElementById(`${input.id}-verify`).value.trim();
+      const reuse = document.getElementById(`${input.id}-reuse`).value;
+      return input.value.trim() || certificateVerifyName || reuse ? [{
+        server: input.dataset.anytlsServer, port: Number(input.dataset.anytlsPort), sni: input.value.trim(),
+        ...(certificateVerifyName ? { certificateVerifyName } : {}), ...(reuse ? { reuse: reuse === 'true' } : {}),
+      }] : [];
+    }),
     addressResolverStrategy: externalResolverStrategyFromPreset(),
     addressResolverDohEndpoint: $('#doh-endpoint').value,
     addressResolverDnsServers: dnsServersFromInput(),
@@ -2142,8 +2269,21 @@ $('#settings-form').addEventListener('submit', async (event) => {
       : engineDraftMode === 'mihomo'
         ? '设置已保存。立即同步后会更新 Mihomo 配置。'
         : engineDraftMode === 'surge-native'
-          ? '设置已保存。立即同步后会写入 Surge 原生 VLESS。'
+          ? '设置已保存。立即同步后会写入 Surge 原生协议节点。'
           : '设置已保存。');
+  } catch (error) {
+    showToast(error.message || String(error), true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$('#save-policy-groups').addEventListener('click', async () => {
+  setBusy(true, '正在保存策略组设置');
+  try {
+    state = await api.saveSettings(settingsPayloadFromForm());
+    renderAll();
+    showToast('策略组设置已保存。预览更新后确认变化。');
   } catch (error) {
     showToast(error.message || String(error), true);
   } finally {
@@ -2158,7 +2298,7 @@ $('#confirm-engine-switch').addEventListener('click', async () => {
     title: targetMode === 'mihomo'
       ? '切换到 Mihomo 网关'
       : targetMode === 'surge-native'
-        ? '切换到 Surge 原生 VLESS'
+        ? '切换到 Surge 原生'
         : '切换到 sing-box External',
     message: $('#engine-change-summary').textContent,
     detail: '切换前会保存当前设置，校验目标引擎并备份 Surge 配置。',
@@ -2255,8 +2395,10 @@ const validateWizardSourcesStep = () => {
       throw new Error('订阅地址仅支持 HTTP、HTTPS 或 data 地址。');
     }
   }
-  if (sources.vlessNodes.some((value) => !value.startsWith('vless://'))) {
-    throw new Error('直接节点必须以 vless:// 开头。');
+  const directPattern = onboardingDraftMode === 'surge-native'
+    ? /^(?:vless|anytls|ss|vmess|trojan|hysteria2|hy2|tuic|tuic-v5):\/\//i : /^vless:\/\//i;
+  if (sources.vlessNodes.some((value) => !directPattern.test(value))) {
+    throw new Error('直接节点协议不受当前运行方式支持，请检查节点链接。');
   }
   return sources;
 };
@@ -2484,6 +2626,20 @@ document.addEventListener('keydown', (event) => {
 $('#copy-output').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#action-output').textContent || '');
   showToast('执行输出已复制。');
+});
+$('#refresh-logs').addEventListener('click', () => loadState(false));
+$('#copy-diagnostic-report').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(await diagnosticReport());
+  showToast('已复制脱敏诊断摘要。');
+});
+$('#export-diagnostic-report').addEventListener('click', async () => {
+  const blob = new Blob([await diagnosticReport()], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `surge-vless-bridge-diagnostic-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  showToast('已导出脱敏诊断摘要。');
 });
 
 $('#install-task-indicator').addEventListener('click', () => {

@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: Desktop service, subscription parser and isolated loopback source fixtures.
+ * [OUTPUT]: Source filtering, cache safety and save/preview/sync regression checks.
+ * [POS]: Subscription lifecycle boundary tests without changing user configurations.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 const assert = require('node:assert/strict');
 const { createServer } = require('node:http');
 const { readFile, rm, writeFile } = require('node:fs/promises');
@@ -137,4 +143,40 @@ test('desktop filtering preview uses private cache without fetching and wizard s
   assert.ok(await readSubscriptionCache(f.config, f.config.subscriptionUrls[0]));
   await service.saveSources({ subscriptionUrls: [], vlessNodes: [] });
   assert.equal(await readSubscriptionCache(f.config, f.config.subscriptionUrls[0]), undefined);
+});
+
+test('changed mixed-protocol source previews and syncs while no-VLESS updates preserve the profile', async t => {
+  const f = await fixture(t);
+  f.config.runtimeMode = 'surge-native';
+  const configPath = path.join(f.root, 'config.json');
+  await writeFile(configPath, JSON.stringify(f.config));
+  const service = new DesktopService({ configPath, executablePath: process.execPath, scheduledEntryPath: '/unused' });
+  service.getState = async () => ({});
+  const oldUrl = f.config.subscriptionUrls[0];
+  const newUrl = `${oldUrl}?format=v2ray`;
+  const body = [vlessLink(1, 'HK valid'), 'anytls://test-only@peer.example:443#AnyTLS',
+    'future+protocol://test-only@peer.example:443#Future', vlessLink(2, 'JP valid')].join('\n');
+  f.setBody(Buffer.from(body).toString('base64'));
+  await service.saveSources({ subscriptionUrls: [oldUrl, newUrl], subscriptionNames: ['Disabled', 'Changed'],
+    subscriptionOptions: [normalizeSubscriptionOptions({ enabled: false }), normalizeSubscriptionOptions()], vlessNodes: [] });
+  const before = await readFile(f.config.surgeConfigPath, 'utf8');
+  const preview = await service.runAction('preview');
+  assert.equal(preview.success, true, preview.message);
+  assert.equal(preview.preview.count, 3);
+  assert.equal(await readFile(f.config.surgeConfigPath, 'utf8'), before);
+  assert.equal(f.requests(), 1);
+  const synced = await service.runAction('sync');
+  assert.equal(synced.success, true, synced.message);
+  assert.equal(synced.count, 3);
+  assert.equal(f.requests(), 2);
+  const after = await readFile(f.config.surgeConfigPath, 'utf8');
+  assert.match(after, /^HK valid = vless,/m);
+  assert.match(after, /^JP valid = vless,/m);
+  assert.match(after, /^AnyTLS = anytls,/m);
+  assert.doesNotMatch(after, /Future|future\+protocol:/);
+  f.setBody('ssr://test-only#Other');
+  const empty = await service.runAction('sync');
+  assert.equal(empty.success, false);
+  assert.match(empty.message, /已识别订阅，但没有可转换为 Surge 原生的/);
+  assert.equal(await readFile(f.config.surgeConfigPath, 'utf8'), after);
 });

@@ -18,6 +18,7 @@
   "vlessNodes": [
     "vless://uuid@example.com:443?type=tcp&security=reality&pbk=public-key&sid=short-id&fp=chrome&sni=example.com&flow=xtls-rprx-vision#Example"
   ],
+  "anytlsSniOverrides": [],
   "surgeConfigPath": "/Users/you/Library/Application Support/Surge/Profiles/Config.conf",
   "policyGroupName": "VLESS",
   "policyGroupTargets": [],

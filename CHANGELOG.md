@@ -2,6 +2,89 @@
 
 ## Unreleased
 
+## [1.8.7] - 2026-11-22
+
+### Fixed
+
+- Probe Surge native UDP with `surge-cli test-policy-udp`, independently of HTTP; report unavailable commands as untested on older Surge versions.
+- Use only validated managed policy names for native diagnostics and keep raw CLI errors out of results.
+- Require an explicit application path for packaged scheduler checks, avoiding stale build directories; bound each subprocess to 60 seconds.
+- Verify packaged files against the current build and ASAR integrity metadata, rejecting manually replaced or stale payloads.
+- Keep a single active navigation item when returning from Node Diagnostics to Overview.
+- Align the desktop guide, bilingual READMEs, build instructions and local development checklist with the current menus and three runtime modes.
+
+## [1.8.6] - 2026-11-18
+
+### Changed
+
+- Renamed the main areas to Sources & Nodes and History & Recovery, and moved maintenance actions into History & Recovery.
+- Show only applicable settings for External, Mihomo, and Surge native modes, hiding irrelevant ports, address resolution, and UDP tests.
+- Kept Mihomo UDP relay and UDP testing visible, documenting that relay writes `udp: true` to nodes.
+- Kept the native SS UDP relay hint and clarified that VLESS, AnyTLS, Hysteria2, and TUIC provide UDP through their protocols.
+- Added recent Surge profile selection, node diagnostics, a policy-group shortcut, and centralized runtime logs.
+- Node diagnostics now cover External/Mihomo local listeners and HTTP probing for Surge native policies.
+- Added copy/export for a redacted diagnostic summary without subscription URLs, node credentials, or full logs.
+- Display diagnostic latency as rounded integer milliseconds and label native Surge UDP as untested instead of implying an active probe.
+
+## [1.8.5] - 2026-11-18
+
+### Added
+
+- Independent AnyTLS certificate verification name and connection reuse settings, shared by manual and scheduled syncs and compatible with existing SNI overrides.
+- Native TLS certificate-name, certificate-pin and Keystore-reference mappings, plus per-policy egress and test parameters.
+- Native VLESS Clash certificate, Encryption and gRPC authority/mode mappings; documented client XHTTP extra mappings.
+- Native parameter reference with minimum versions and explicit limitations.
+
+### Fixed
+
+- Accept matching Hysteria2 ports/mport aliases and reject conflicting ranges.
+- Distinguish client fingerprints, certificate SHA-256 digests and Reality public keys; reject malformed certificate pins and escaped SNI names.
+- Preserve explicit per-policy IP-family and TFO choices over bridge defaults.
+- Use automatic ALPN for XHTTP and h2 for gRPC when a share link omits ALPN.
+- Safely report APFS EINVAL during concurrent legacy-lock migration as a busy operation.
+
+## [1.8.4] - 2026-11-16
+
+### Fixed
+
+- Add per-endpoint AnyTLS SNI settings for Surge native mode, shared by previews, manual syncs and background scheduled syncs.
+- Show the subscription SNI and clear overrides to restore it. Keep credentials, ALPN and certificate verification unchanged; never infer server identity from an unverified certificate.
+- Retain editable overrides for temporarily absent endpoints.
+- Report APFS EINVAL during contested lock initialization as a busy operation.
+
+## [1.8.3] - 2026-11-16
+
+### Fixed
+
+- Recover sync and subscription-cache locks left by confirmed dead processes, including legacy PID records. Keep live and incomplete locks protected.
+- Use unique owner records and non-recursive release so competing recovery processes cannot delete a new owner's lock.
+- Retry transient gateway and connection failures once. Report HTTP 403 and certificate failures immediately.
+- Distinguish DNS, TLS, connection timeouts and gateway errors, retaining safe proxy failure details without private URL paths or response bodies.
+
+## [1.8.2] - 2026-11-16
+
+### Added
+
+- Convert SS, VMess, Trojan, AnyTLS, Hysteria2, TUIC v4/v5 and VLESS subscriptions to their corresponding Surge native policy types, including share links, Base64 and Clash YAML/JSON.
+- Show runtime-specific protocol support and safe compatibility notices. Native direct nodes use the same converter.
+- Retain System/Light/Dark appearance, official engine artwork and the DNS and loading improvements from the 1.8.2 previews.
+
+### Fixed
+
+- Detect complete URI lists without a fixed protocol whitelist, so new schemes do not invalidate adjacent supported nodes.
+- Preserve VMess AEAD/TLS/WebSocket, AnyTLS credentials/TLS and Hysteria2 authentication/port hopping; reject unmapped required fields.
+- Separate native multi-protocol caches from VLESS backend caches, retaining legacy snapshots as an initial fallback.
+- Avoid native node name collisions with existing policies and groups; count all native policy types in status and previews.
+- Keep External and Mihomo VLESS conversion behavior and reject native-only direct nodes when switching to those modes.
+
+## [1.8.2-beta.6] - 2026-11-15
+
+### Added
+
+- Add System, Light and Dark appearance choices with immediate application and persistent local preferences.
+- Bundle official Surge, sing-box and Mihomo artwork for runtime selection and setup, with source attribution.
+- Share semantic colors across forms, logs, dialogs and loading states in both themes.
+
 ### Changed
 
 - Emit `tls=true` explicitly for native Reality policies, retaining their public key, short ID, SNI and Vision flow.

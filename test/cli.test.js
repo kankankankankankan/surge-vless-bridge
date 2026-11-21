@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: CLI entry point, isolated configs and command arguments.
+ * [OUTPUT]: Regression coverage for parsing, help metadata, init and version commands.
+ * [POS]: Public command-line boundary without modifying the user's config or profile.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 const assert = require('node:assert/strict');
 const { execFile } = require('node:child_process');
 const { mkdtemp, readFile } = require('node:fs/promises');
@@ -63,7 +69,7 @@ test('help shows the metadata footer with version and links', async () => {
   const { code, stdout } = await runCli(['help']);
 
   assert.equal(code, 0);
-  assert.match(stdout, /^Use VLESS subscriptions in Surge Mac/);
+  assert.match(stdout, /^Convert Surge subscriptions with sing-box External/);
   assert.match(stdout, /^Usage:\n {2}surge-vless-bridge <command> \[flags\]$/m);
   assert.match(stdout, /^Version {7}\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/m);
   assert.match(stdout, /^Homepage {6}https:\/\/github\.com\/chen86860\/surge-vless-bridge$/m);

@@ -1,4 +1,10 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+/**
+ * [INPUT]: Built renderer, preload and isolated IPC fixtures.
+ * [OUTPUT]: Interaction assertions and optional screenshots across themes and widths.
+ * [POS]: Desktop acceptance check; never operates on user subscriptions or services.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
+const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
 const assert = require('node:assert/strict');
 const { mkdtemp, writeFile, rm, mkdir } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
@@ -19,10 +25,12 @@ const state = {
     policyGroupName: 'VLESS', policyGroupTargets: [], policyGroupExclusions: [], policyGroupTargetModes: {},
     portStart: 2081, backupKeep: 20, autoReload: true, udpRelay: true, udpTestEnabled: false, udpTestTarget: 'dns.google@8.8.8.8',
     tcpFastOpen: false, connectTimeoutEnabled: false, connectTimeoutSeconds: 5,
-    subscriptionProxyUrl: '',
+    subscriptionProxyUrl: '', anytlsSniOverrides: [],
     addressResolverStrategy: 'off', addressResolverDohEndpoint: '', addressResolverDnsServers: [], addressResolverFilterSurgeFakeIp: true,
   },
   doctor: { checks: ['nodeSources', 'surgeConfigPath', 'mihomoBinary', 'proxy-group-section', 'proxy-section', 'rule-section', 'mihomo-config', 'mihomo-launch-agent', 'mihomo-controller', 'mihomo-listeners'].map(label => ({ label, level: 'ok', detail: '检查通过' })), failures: 0, warnings: 0 },
+  anytlsNodes: [{ name: 'AnyTLS 示例节点', server: 'anytls.example', port: 443, sourceSni: '' },
+    { name: 'AnyTLS 长名称 '.repeat(8), server: `${'edge-'.repeat(10)}node.example`, port: 8443, sourceSni: 'source.example' }],
   nodeCount: 3, subscriptionStatuses: [], diagnosticNodes: [
     { name: 'HK 香港 长名称 '.repeat(6), port: 2081 }, { name: 'HK 香港 02', port: 2082 }, { name: 'JP 日本 01', port: 2083 },
   ],
@@ -53,6 +61,29 @@ const screenshot = async name => {
   if (!output) return;
   await wait(220);
   await writeFile(join(output, name), (await window.webContents.capturePage()).toPNG());
+};
+
+const assertThemeContrast = async label => {
+  const lowContrast = await evaluate(`(() => {
+    const rgb = value => value.match(/[\\d.]+/g).map(Number);
+    const luminance = values => values.slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
+    const failures = [];
+    for (const el of document.querySelectorAll('#page-subtitle, .view.active .section-heading p, .view.active .field-help, .view.active .engine-switch-option small, .view.active .appearance-control button, .view.active input[type="text"], .view.active select, .topbar-actions .button, .preview-sheet p, .preview-footer > span')) {
+      if (!el.getClientRects().length || el.disabled) continue;
+      let parent = el, background;
+      while (parent) {
+        const color = rgb(getComputedStyle(parent).backgroundColor);
+        if (color.length===3 || color[3] >= .99) { background = color; break; }
+        parent = parent.parentElement;
+      }
+      if (!background) continue;
+      const fg = luminance(rgb(getComputedStyle(el).color)), bg = luminance(background);
+      const ratio = (Math.max(fg,bg)+.05)/(Math.min(fg,bg)+.05);
+      if (ratio < 4.5) failures.push({element:el.id || el.className,ratio});
+    }
+    return failures;
+  })()`);
+  assert.deepEqual(lowContrast, [], `${label}: body text contrast must be at least 4.5:1`);
 };
 
 const assertSpinnerMoves = async label => {
@@ -103,22 +134,38 @@ const assertSpinnerMoves = async label => {
   });
   ipcMain.handle('desktop:diagnose-node', async (_event, node) => {
     diagnosed.push(node); await wait(300);
-    const part = { success: true, skipped: false, detail: '测试通过', target: 'fixture.invalid', latencyMs: 12 };
+    const part = { success: true, skipped: false, detail: '测试通过', target: 'fixture.invalid', latencyMs: 12.6 };
     return { testedAt: new Date().toISOString(), tcp: part, udp: node.port === 2082 ? { ...part, success: false, detail: '等待 DNS 响应超时' } : part };
   });
   await app.whenReady();
+  nativeTheme.themeSource = 'dark';
   window = new BrowserWindow({ width: 1180, height: 780, show: false,
     webPreferences: { preload: resolve('dist/desktop/preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   window.once('ready-to-show', () => window.showInactive());
   window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message); });
   await window.loadFile(resolve('dist/desktop/renderer/index.html'));
+  assert.equal(await evaluate(`document.documentElement.dataset.theme`), 'dark', 'First paint must follow the system dark theme');
   await until(`document.querySelector('#refresh-state').classList.contains('is-loading')`);
   await assertSpinnerMoves('startup');
   assert.equal(await evaluate(`document.querySelector('#loading-status').textContent`), '正在读取配置');
   await screenshot('startup-loading.png');
   releaseStartup();
   await until(`document.querySelector('#loading-cover').classList.contains('hidden') && document.querySelectorAll('[data-diagnostic-port]').length===3`);
+  assert.equal(await evaluate(`document.querySelector('#diagnostics-nav').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelector('#history-scheduler-log') !== null && document.querySelector('#copy-diagnostic-report') !== null`), true);
+  await click('#diagnostics-nav');
+  await until(`document.querySelector('#page-title').textContent === '节点诊断'`);
+  assert.equal(await evaluate(`document.querySelectorAll('.nav-item.active').length`), 1);
+  await click('[data-view="history"]');
+  assert.equal(await evaluate(`document.querySelector('#export-diagnostic-report') !== null`), true);
+  await click('[data-view="policy-groups"]');
+  await until(`document.querySelector('#page-title').textContent === '策略组'`);
+  assert.equal(await evaluate(`document.querySelector('#save-policy-groups') !== null`), true);
+  await click('[data-view="overview"]');
+  assert.equal(await evaluate(`document.querySelectorAll('.nav-item.active').length`), 1);
   assert.equal(await evaluate(`document.querySelector('#refresh-state').classList.contains('is-loading')`), false);
+  nativeTheme.themeSource = 'light';
+  await until(`document.documentElement.dataset.theme === 'light'`);
   assert.equal(await evaluate(`document.querySelector('#traffic-flow-note').textContent.includes('桥接后端出站')`), true);
   assert.equal(await evaluate(`document.querySelectorAll('#schedule-run-at-load').length`), 1);
   assert.equal(await evaluate(`document.querySelector('#schedule-options').classList.contains('is-disabled')`), true);
@@ -135,6 +182,9 @@ const assertSpinnerMoves = async label => {
   await until(`document.querySelector('#diagnostic-progress').textContent.includes('检测完成')`);
   assert.equal(diagnosed.length, 3);
   assert.equal(await evaluate(`document.querySelectorAll('.diagnostic-outcome.status-warning').length`), 1);
+  const diagnosticText = await evaluate(`document.querySelector('#diagnostic-list').textContent`);
+  assert.match(diagnosticText, /通过 · 13 ms/);
+  assert.doesNotMatch(diagnosticText, /12\.6/);
   await evaluate(`document.querySelector('#node-diagnostics').scrollIntoView({block:'start',behavior:'instant'})`);
   await wait(150);
   await screenshot('diagnostics-1180.png');
@@ -272,6 +322,116 @@ const assertSpinnerMoves = async label => {
       await click('#close-setup-wizard');
     }
   }
+  state.config.runtimeMode = 'surge-native';
+  state.subscriptionStatuses = [{ state: 'fresh', count: 38, lastSuccessAt: new Date().toISOString(),
+    notices: ['第 7 个节点：Surge 原生使用自身 TLS 指纹，订阅的自定义指纹不参与转换。'] }];
+  await click('#refresh-state');
+  await until(`document.querySelector('#loading-cover').classList.contains('hidden')`);
+  await click('[data-view="settings"]');
+  assert.ok(await evaluate(`document.querySelectorAll('#surge-profile-select option').length >= 1`));
+  await click('[data-view="settings"]');
+  await click('[data-runtime-mode="external"]');
+  assert.equal(await evaluate(`document.querySelector('#port-start-field').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelector('#udp-test-option').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelector('#external-resolver-settings').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelector('#mihomo-settings').classList.contains('hidden')`), true);
+  await click('[data-runtime-mode="mihomo"]');
+  assert.equal(await evaluate(`document.querySelector('#port-start-field').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelector('#udp-test-option').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelector('#external-resolver-settings').classList.contains('hidden')`), true);
+  assert.equal(await evaluate(`document.querySelector('#mihomo-settings').classList.contains('hidden')`), false);
+  await click('[data-runtime-mode="surge-native"]');
+  assert.equal(await evaluate(`document.querySelector('#port-start-field').classList.contains('hidden')`), true);
+  assert.equal(await evaluate(`document.querySelector('#udp-test-option').classList.contains('hidden')`), true);
+  assert.equal(await evaluate(`document.querySelector('#external-resolver-settings').classList.contains('hidden')`), true);
+  assert.equal(await evaluate(`document.querySelector('#mihomo-settings').classList.contains('hidden')`), true);
+  await click('[data-runtime-mode="surge-native"]');
+  assert.equal(await evaluate(`document.querySelector('#anytls-sni-settings').classList.contains('hidden')`), false);
+  assert.equal(await evaluate(`document.querySelectorAll('[data-anytls-server]').length`), 2);
+  await input('#anytls-sni-0', 'cert.example');
+  await evaluate(`document.querySelector('#settings-form').requestSubmit()`);
+  await until(`document.querySelector('#toast').textContent.includes('设置已保存')`);
+  assert.deepEqual(state.config.anytlsSniOverrides, [{ server: 'anytls.example', port: 443, sni: 'cert.example' }]);
+  await input('#anytls-sni-0', '');
+  await input('#anytls-sni-0-verify', 'verify.example');
+  await input('#anytls-sni-0-reuse', 'false');
+  await evaluate(`document.querySelector('#settings-form').requestSubmit()`);
+  await until(`!document.querySelector('#settings-form button[type="submit"]').disabled`);
+  assert.deepEqual(state.config.anytlsSniOverrides, [{ server: 'anytls.example', port: 443, sni: '', certificateVerifyName: 'verify.example', reuse: false }]);
+  await input('#anytls-sni-0-verify', '');
+  await input('#anytls-sni-0-reuse', '');
+  await evaluate(`document.querySelector('#settings-form').requestSubmit()`);
+  await until(`document.querySelector('#anytls-sni-0').value === '' && !document.querySelector('#settings-form button[type="submit"]').disabled`);
+  assert.deepEqual(state.config.anytlsSniOverrides, []);
+  await click('[data-view="sources"]');
+  assert.match(await evaluate(`document.querySelector('#source-protocol-hint').textContent`), /AnyTLS.*Hysteria2.*TUIC/);
+  assert.equal(await evaluate(`document.querySelector('#direct-node-title').textContent`), '直接代理节点');
+  await evaluate(`document.querySelector('#subscription-statuses details').open=true`);
+  for (const width of [1180, 720]) {
+    window.setContentSize(width, width === 720 ? 680 : 780);
+    await evaluate(`document.querySelector('#subscription-statuses').scrollIntoView({block:'center',behavior:'instant'})`);
+    await wait(120);
+    assert.ok(await evaluate(`(() => {const el=document.querySelector('#view-sources');return el.scrollWidth<=el.clientWidth})()`), 'Native source details must not overflow');
+    await screenshot(`native-sources-${width}.png`);
+  }
+  window.setContentSize(1180, 780);
+  await click('[data-view="settings"]');
+  await evaluate(`document.querySelector('.main-content').scrollTop=0`);
+  assert.equal(await evaluate(`Array.from(document.querySelectorAll('.engine-brand-icon')).every(img=>img.complete && img.naturalWidth>0)`), true, 'Every engine must show its packaged project artwork');
+  assert.equal(await evaluate(`document.querySelector('#runtime-mode-native img').getAttribute('src')`), 'assets/engines/surge.png');
+  await click('[data-appearance="dark"]');
+  assert.equal(await evaluate(`document.documentElement.dataset.theme`), 'dark');
+  await window.webContents.reload();
+  await until(`document.querySelector('#loading-cover').classList.contains('hidden') && document.querySelector('#runtime-mode-control')`);
+  assert.equal(await evaluate(`document.documentElement.dataset.theme`), 'dark', 'Explicit theme must survive a renderer reload');
+  // Exercise Electron's actual macOS theme propagation instead of CDP media emulation.
+  nativeTheme.themeSource = 'light';
+  await until(`!matchMedia('(prefers-color-scheme: dark)').matches`);
+  assert.equal(await evaluate(`document.documentElement.dataset.theme`), 'dark', 'System changes must not override an explicit preference');
+  await click('[data-view="settings"]');
+  await click('[data-appearance="system"]');
+  await until(`document.documentElement.dataset.theme === 'light'`);
+  nativeTheme.themeSource = 'dark';
+  await until(`matchMedia('(prefers-color-scheme: dark)').matches`);
+  await until(`document.documentElement.dataset.theme === 'dark'`);
+  for (const theme of ['light', 'dark']) {
+    await click(`[data-appearance="${theme}"]`);
+    for (const width of [1180, 720]) {
+      window.setContentSize(width, width === 720 ? 680 : 780);
+      for (const view of ['overview', 'sources', 'policy-groups', 'schedule', 'history', 'settings']) {
+        await click(`[data-view="${view}"]`);
+        await evaluate(`document.querySelector('.main-content').scrollTop=0`);
+        const outside = await evaluate(`Array.from(document.querySelectorAll('.view.active button, .view.active input, .view.active select')).filter(el=>el.getClientRects().length).filter(el=>{const r=el.getBoundingClientRect();return r.left<0||r.right>innerWidth+1}).map(el=>el.id)`);
+        assert.deepEqual(outside, [], `${theme} ${view} at ${width}px`);
+        await assertThemeContrast(`${theme} ${view} at ${width}px`);
+        await screenshot(`${theme}-${view}-${width}.png`);
+        if (view === 'settings') {
+          await evaluate(`document.querySelector('#anytls-sni-settings').scrollIntoView({block:'center',behavior:'instant'})`);
+          const sniOverflow = await evaluate(`Array.from(document.querySelectorAll('.anytls-sni-row')).filter(el=>el.scrollWidth>el.clientWidth+1).length`);
+          assert.equal(sniOverflow, 0, `AnyTLS SNI rows must fit ${theme} ${width}px`);
+          await screenshot(`anytls-sni-${theme}-${width}.png`);
+        }
+      }
+      await evaluate(`document.querySelector('.appearance-control').scrollIntoView({block:'center',behavior:'instant'})`);
+      await screenshot(`${theme}-appearance-${width}.png`);
+      await click('#open-setup-wizard');
+      await screenshot(`${theme}-wizard-${width}.png`);
+      await click('#close-setup-wizard');
+      await evaluate(`renderPreview({count:3,added:1,removed:0,profileChanged:true,policyGroupName:'VLESS',policyGroupTargets:[],policyGroupExclusions:[],surgeConfigPath:'/tmp/bridge-fixture/profile.conf',nodes:[{name:'HK 示例节点',server:'node.example.com',port:2081}],udpRelay:true}); document.querySelector('#preview-overlay').classList.remove('hidden')`);
+      await assertThemeContrast(`${theme} preview`);
+      await screenshot(`${theme}-preview-${width}.png`);
+      await click('#close-preview');
+      await evaluate(`showToast('示例：连接失败，请查看诊断结果。', true)`);
+      await screenshot(`${theme}-error-${width}.png`);
+      await evaluate(`document.querySelector('#toast').classList.remove('show')`);
+    }
+  }
+  await evaluate(`document.querySelector('[data-appearance="dark"]').focus()`);
+  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Left' });
+  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Left' });
+  await until(`document.documentElement.dataset.themePreference === 'light'`);
+  assert.equal(await evaluate(`document.activeElement.dataset.appearance`), 'light');
+  await click('[data-appearance="system"]');
   assert.deepEqual(errors, []);
   console.log('Desktop controls passed: filtering, save alignment, disabled source, batch selection/progress/stop, narrow layout.');
 })().catch(error => { console.error(error); smokeExitCode = 1; }).finally(async () => {

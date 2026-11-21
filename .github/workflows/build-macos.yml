@@ -82,7 +82,7 @@ jobs:
         shell: bash
         run: |
           npm run desktop:verify -- "${{ steps.artifact.outputs.app }}"
-          SVB_PACKAGED_APP_DIR="${{ matrix.app-dir }}" npm run desktop:smoke
+          npm run desktop:smoke -- "${{ steps.artifact.outputs.app }}"
           codesign --verify --deep --strict --verbose=2 "${{ steps.artifact.outputs.app }}"
           executable="${{ steps.artifact.outputs.app }}/Contents/MacOS/Surge VLESS Bridge"
           file "$executable"

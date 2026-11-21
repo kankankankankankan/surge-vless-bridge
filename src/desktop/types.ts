@@ -1,10 +1,15 @@
-import type { AddressResolverStrategy, MihomoDnsMode, PolicyGroupTargetMode, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
+/**
+ * [INPUT]: 核心配置、内核状态与桌面任务结果。
+ * [OUTPUT]: 桌面 IPC 契约及不含凭据的 AnyTLS 来源 TLS 名称和复用状态。
+ * [POS]: 主进程与 preload、渲染器之间的数据边界。
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
+import type { AddressResolverStrategy, AnyTlsSniOverride, MihomoDnsMode, PolicyGroupTargetMode, RuntimeMode, SubscriptionOptions } from '../types/cli-config';
 import type { SingBoxVersionStatus } from './dependencies';
 import type { MihomoVersionStatus } from '../mihomo/dependencies';
 import type { MihomoServiceStatus } from '../mihomo/launch-agent';
 import type { InstallProgressEvent } from '../install-progress';
 import type { SubscriptionStatus } from '../utils/subscription-cache';
-import type { diagnoseMihomoNode } from '../mihomo/probe';
 
 export type DesktopAction = 'doctor' | 'preview' | 'sync' | 'rebuild' | 'restore' | 'clean';
 
@@ -62,6 +67,7 @@ export type DesktopConfigView = {
   subscriptionNames: string[];
   subscriptionOptions: SubscriptionOptions[];
   vlessNodes: string[];
+  anytlsSniOverrides: AnyTlsSniOverride[];
   surgeConfigPath: string;
   singBoxBinary: string;
   mihomoBinary: string;
@@ -129,7 +135,8 @@ export type DesktopState = {
   };
   nodeCount: number;
   subscriptionStatuses: Array<SubscriptionStatus | undefined>;
-  diagnosticNodes: Array<{ name: string; port: number }>;
+  diagnosticNodes: Array<{ name: string; port: number; policy?: string }>;
+  anytlsNodes: Array<{ name: string; server: string; port: number; sourceSni: string; sourceCertificateVerifyName: string; sourceReuse: boolean }>;
   backups: BackupView[];
   history: ActivityEntry[];
   schedule: ScheduleSettings;
@@ -189,7 +196,11 @@ export type ActionResult = {
 export type DesktopApi = {
   getVersion: () => Promise<string>;
   getState: () => Promise<DesktopState>;
-  diagnoseNode: (input: { port: number; name: string }) => ReturnType<typeof diagnoseMihomoNode>;
+  diagnoseNode: (input: { port: number; name: string; policy?: string }) => Promise<{
+    testedAt: string;
+    tcp: { success: boolean; skipped?: boolean; stage: string; detail: string; latencyMs: number; target: string };
+    udp: { success: boolean; skipped?: boolean; stage: string; detail: string; latencyMs: number; target: string };
+  }>;
   inspectPolicyGroups: (input: { surgeConfigPath: string; policyGroupName: string }) => Promise<PolicyGroupView[]>;
   saveSources: (input: { subscriptionUrls: string[]; subscriptionNames?: string[]; subscriptionOptions?: SubscriptionOptions[]; vlessNodes: string[] }) => Promise<DesktopState>;
   previewSourceFilters: (input: { subscriptionUrl: string; options: SubscriptionOptions }) => Promise<{ available: boolean; total: number; matched: number; skipped: number }>;

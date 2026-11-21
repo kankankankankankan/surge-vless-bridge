@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 使用订阅解析、配置模型、私有文件写入与 Surge CLI。
- * [OUTPUT]: 提供 External 和原生 VLESS 同步、策略组编辑、备份与检查。
+ * [INPUT]: 订阅、原生参数映射、单端点 AnyTLS TLS 设置、私有写入与 Surge CLI。
+ * [OUTPUT]: 提供 External 和原生多协议同步、策略组编辑、备份与检查。
  * [POS]: 桥接核心；engines 分发运行方式，Mihomo 复用档案编辑能力。
  * [PROTOCOL]: Update this header on change, then check AGENTS.md
  */
@@ -15,6 +15,10 @@ import { connect as connectTls } from 'node:tls';
 import { promisify } from 'node:util';
 
 import { getVlessSubscriptionNodes } from './parse';
+import { applyAnyTlsSniOverride } from './native/anytls-sni';
+import { nativeXhttpParameters } from './native/xhttp';
+import { nativePolicyParameters } from './native/parameters';
+import { normalizeCertificateFingerprint, validateTlsName } from './native/tls';
 import { SubscriptionError } from './utils/subscription-error';
 import { pruneSubscriptionCache, readSubscriptionCache, writeSubscriptionCache } from './utils/subscription-cache';
 import { filterSubscriptionNodes, subscriptionOptionsForUrl } from './utils/subscription-options';
@@ -28,6 +32,7 @@ import { stopManagedSingBoxProcesses } from './utils/managed-processes';
 import { parseHttpApiSettings, reloadSurgeProfile } from './utils/surge-reload';
 import { planStablePorts, stableNodeIdentity, stableNodeVariant, stablePortFile, type PortEntry, type PortIdentity } from './utils/stable-ports';
 import { findSurgeCli, validateSurgeProfile } from './utils/surge-cli';
+import { buildNativeProxyLine, parseNativeProxy, quoteSurgeValue, type NativeProxyNode } from './native/proxy';
 
 const POLICY_REGEX_FILTER = /^((?!Remain|Expired|官网|如需|套餐|去除|剩余|距离|Reset|重置|流量).)+$/;
 const MANAGED_CONFIG_PATTERN = /^sing-box\[\d+\]\.json$/;
@@ -336,6 +341,9 @@ export const getConfiguredVlessNodes = (config: CliConfig) =>
 
 export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(config.outputDir, '.subscription-operation.lock'), async () => {
   const subscriptionUrls = getSubscriptionUrls(config);
+  if (config.runtimeMode !== 'surge-native' && getConfiguredVlessNodes(config).some(link => !/^vless:\/\//i.test(link))) {
+    throw new Error('直接节点包含当前外部内核模式尚未支持的协议，请切回 Surge 原生或移除这些直接节点。');
+  }
   const failures: string[] = [];
   await pruneSubscriptionCache(config, subscriptionUrls);
   const describeSubscription = (index: number) => `Subscription ${index + 1} of ${subscriptionUrls.length}`;
@@ -346,15 +354,20 @@ export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(c
       const previous = await readSubscriptionCache(config, subscriptionUrl);
       const checkedAt = new Date().toISOString();
       const skippedReasons: string[] = [];
+      const notices: string[] = [];
       let nodes: string[];
       try {
         nodes = await getVlessSubscriptionNodes({
           subscriptionUrl,
           requestHeaders: config.requestHeaders,
           proxyUrl: config.subscriptionProxyUrl,
-          parseOptions: { skipUnsupported: options.skipUnsupported, onSkipped: reason => skippedReasons.push(reason) },
+          parseOptions: { native: config.runtimeMode === 'surge-native', skipUnsupported: options.skipUnsupported,
+            onSkipped: reason => skippedReasons.push(reason), onNotice: message => notices.push(message) },
         });
-        nodes.forEach((node, nodeIndex) => parseVlessNode(node, nodeIndex));
+        nodes.forEach((node, nodeIndex) => {
+          if (config.runtimeMode === 'surge-native' && !/^vless:\/\//i.test(node)) parseNativeProxy(node, nodeIndex);
+          else parseVlessNode(node, nodeIndex);
+        });
       } catch (error) {
         const detail = error instanceof SubscriptionError ? error.message : '订阅读取失败。';
         failures[index] = `订阅 ${index + 1}：${detail}`;
@@ -369,6 +382,7 @@ export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(c
           filteredCount: cached.length - selected.length,
           skippedCount: previous?.skippedCount,
           skippedReasons: previous?.skippedReasons,
+          notices: previous?.notices,
           state: usableCache ? 'cached' : 'failed', detail,
         });
         console.warn(`${describeSubscription(index)}: ${detail}${usableCache
@@ -384,10 +398,12 @@ export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(c
         filteredCount: nodes.length - selected.length,
         skippedCount: skippedReasons.length,
         skippedReasons,
+        notices,
       });
       if (skippedReasons.length) console.warn(`${describeSubscription(index)}: 已跳过 ${skippedReasons.length} 个不兼容节点。\n${skippedReasons.join('\n')}`);
+      if (notices.length) console.warn(`${describeSubscription(index)}: 兼容提示\n${notices.join('\n')}`);
       if (nodes.length === 0) {
-        failures[index] = `订阅 ${index + 1}：已识别订阅，但没有 VLESS 节点。`;
+        failures[index] = `订阅 ${index + 1}：已识别订阅，但没有${config.runtimeMode === 'surge-native' ? '可转换为 Surge 原生的' : ' VLESS '}节点。`;
         console.warn(`${describeSubscription(index)} returned no VLESS nodes.`);
       }
       if (nodes.length && !selected.length) failures[index] = `订阅 ${index + 1}：筛选后没有匹配节点。`;
@@ -399,7 +415,9 @@ export const collectVlessNodes = (config: CliConfig) => withDirectoryLock(join(c
     ...new Set([...vlessNodesBySubscription.flat(), ...getConfiguredVlessNodes(config)].map((node) => node.trim())),
   ].filter(Boolean);
   if (nodes.length === 0) {
-    throw new Error(['No VLESS nodes from any configured source; refusing to update the Surge profile.', ...failures.filter(Boolean)].join('\n'));
+    throw new Error([config.runtimeMode === 'surge-native'
+      ? '没有可转换为 Surge 原生的节点，已保留现有 Surge 配置。'
+      : 'No VLESS nodes from any configured source; refusing to update the Surge profile.', ...failures.filter(Boolean)].join('\n'));
   }
   return nodes;
 });
@@ -1314,13 +1332,13 @@ export const parseSyncVlessNodes = (links: string[]) => {
   return { outbounds, unnamed };
 };
 
-export const stablePolicyNames = (outbounds: SingBoxVlessOutbound[], previous: PortIdentity[] = [], unnamed: boolean[] = []) => {
-  const used = new Set<string>();
+export const stablePolicyNames = (outbounds: Array<SingBoxVlessOutbound | NativeProxyNode>, previous: PortIdentity[] = [], unnamed: boolean[] = [], reserved: string[] = []) => {
+  const used = new Set<string>(reserved);
   const names: string[] = new Array(outbounds.length);
   const entries = outbounds.map((node, index) => ({ node, index, name: sanitizePolicyName(node.tag, index), variant: stableNodeVariant(node) }));
   entries.sort((left, right) => left.name.localeCompare(right.name)
-    || stableNodeIdentity({ name: left.name, server: left.node.server, serverPort: left.node.server_port, uuid: left.node.uuid })
-      .localeCompare(stableNodeIdentity({ name: right.name, server: right.node.server, serverPort: right.node.server_port, uuid: right.node.uuid }))
+    || stableNodeIdentity({ name: left.name, server: left.node.server, serverPort: left.node.server_port, uuid: left.node.uuid ?? left.variant })
+      .localeCompare(stableNodeIdentity({ name: right.name, server: right.node.server, serverPort: right.node.server_port, uuid: right.node.uuid ?? right.variant }))
     || left.variant.localeCompare(right.variant));
   for (const entry of entries) {
     const candidates = previous.filter(node => node.server === entry.node.server && node.serverPort === entry.node.server_port
@@ -1344,11 +1362,6 @@ export const stablePolicyNames = (outbounds: SingBoxVlessOutbound[], previous: P
   return names;
 };
 
-const quoteSurgeValue = (value: string) => {
-  const normalized = value.replace(/[\r\n]/g, ' ').trim();
-  return /[\s,=]/.test(normalized) ? `"${normalized.replace(/(["\\])/g, '\\$1')}"` : normalized;
-};
-
 const appendSurgeParameter = (parameters: string[], key: string, value?: string) => {
   if (value === undefined || value === '') return;
   parameters.push(`${key}=${quoteSurgeValue(value)}`);
@@ -1358,11 +1371,17 @@ export const buildNativeVlessProxyLine = ({
   nodeName,
   outbound,
   config,
+  policyParameters = {},
 }: {
   nodeName: string;
   outbound: SingBoxVlessOutbound;
   config: Pick<CliConfig, 'tcpFastOpen'>;
+  policyParameters?: Record<string, string>;
 }) => {
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(outbound.uuid)
+    && (Buffer.byteLength(outbound.uuid) < 1 || Buffer.byteLength(outbound.uuid) > 30)) {
+    throw new SubscriptionError('VLESS 用户 ID 必须为标准 UUID 或 1～30 字节的字符串。');
+  }
   const parameters = [`${nodeName} = vless`, quoteSurgeValue(outbound.server), String(outbound.server_port)];
   appendSurgeParameter(parameters, 'username', outbound.uuid);
   appendSurgeParameter(parameters, 'flow', outbound.flow);
@@ -1375,11 +1394,13 @@ export const buildNativeVlessProxyLine = ({
   } else if (outbound.tls?.enabled) {
     parameters.push('tls=true');
   }
-  appendSurgeParameter(parameters, 'sni', outbound.tls?.server_name);
+  if (outbound.tls?.server_name) appendSurgeParameter(parameters, 'sni', validateTlsName(outbound.tls.server_name, 'SNI'));
   if (outbound.tls?.insecure) parameters.push('skip-cert-verify=true');
   if (!outbound.tls?.reality) {
-    appendSurgeParameter(parameters, 'server-cert-fingerprint-sha256', outbound.tls?.certificate_fingerprint_sha256);
-    appendSurgeParameter(parameters, 'server-cert-verify-name', outbound.tls?.certificate_verify_name);
+    if (outbound.tls?.certificate_fingerprint_sha256) appendSurgeParameter(parameters, 'server-cert-fingerprint-sha256',
+      normalizeCertificateFingerprint(outbound.tls.certificate_fingerprint_sha256));
+    if (outbound.tls?.certificate_verify_name) appendSurgeParameter(parameters, 'server-cert-verify-name',
+      validateTlsName(outbound.tls.certificate_verify_name, '证书校验名称'));
   }
   if (outbound.tls?.alpn?.length && !outbound.tls.reality) {
     appendSurgeParameter(parameters, 'alpn', outbound.tls.alpn.join(','));
@@ -1401,17 +1422,19 @@ export const buildNativeVlessProxyLine = ({
     appendSurgeParameter(parameters, 'grpc-authority', transport.authority);
     if (transport.mode === 'multi') parameters.push('grpc-mode=multi');
   } else if (transport?.type === 'xhttp') {
-    if (transport.extra) {
-      throw new Error('XHTTP extra 参数暂未支持原生 Surge 转换，请先去掉 extra 或继续使用 External。');
-    }
     parameters.push('xhttp=true');
     appendSurgeParameter(parameters, 'xhttp-path', transport.path ?? '/');
     appendSurgeParameter(parameters, 'xhttp-host', transport.host);
     appendSurgeParameter(parameters, 'xhttp-mode', transport.mode);
+    if (transport.extra) {
+      for (const [key, value] of Object.entries(nativeXhttpParameters(transport.extra, transport.mode))) {
+        appendSurgeParameter(parameters, key, value);
+      }
+    }
   }
 
-  if (config.tcpFastOpen) parameters.push('tfo=true');
-  parameters.push('ip-version=prefer-v4');
+  const common = { ...(config.tcpFastOpen ? { tfo: 'true' } : {}), 'ip-version': 'prefer-v4', ...policyParameters };
+  for (const [key, value] of Object.entries(common)) appendSurgeParameter(parameters, key, value);
   return parameters.join(', ');
 };
 
@@ -1431,17 +1454,28 @@ export const syncNativeSurgeToSurge = async (config: CliConfig, { dryRun = false
   await ensureWritableDirs(config);
 
   const vlessNodes = await collectVlessNodes(config);
-  const { outbounds, unnamed } = parseSyncVlessNodes(vlessNodes);
-  const names = stablePolicyNames(outbounds, [], unnamed);
-  const proxyLines = outbounds.map((outbound, index) =>
-    buildNativeVlessProxyLine({ nodeName: names[index]!, outbound, config }),
-  );
+  const unnamed = vlessNodes.map(link => /^vless:\/\//i.test(link) && !decodeURIComponent(new URL(link).hash.slice(1)).trim());
+  const outbounds = vlessNodes.map((link, index) => {
+    if (!/^vless:\/\//i.test(link)) return applyAnyTlsSniOverride(parseNativeProxy(link, index), config.anytlsSniOverrides);
+    const node = parseVlessNode(link, index);
+    if (unnamed[index]) node.tag = `vless-${stableNodeVariant(node).slice(0, 12)}`;
+    return node;
+  });
+  const currentProfile = await readTextFile(config.surgeConfigPath);
+  const unmanagedProfile = currentProfile.replace(new RegExp(`${escapeRegExp(config.proxyStartMarker)}[\\s\\S]*?${escapeRegExp(config.proxyEndMarker)}`), '');
+  const reserved = unmanagedProfile.split('\n').map(line => line.match(/^\s*([^#;\[\]=][^=]*?)\s*=/)?.[1]?.trim())
+    .filter((name): name is string => Boolean(name));
+  const names = stablePolicyNames(outbounds, [], unnamed, [...reserved, config.policyGroupName]);
+  const proxyLines = outbounds.map((outbound, index) => outbound.type === 'vless'
+    ? buildNativeVlessProxyLine({ nodeName: names[index]!, outbound, config,
+      policyParameters: nativePolicyParameters(new URL(vlessNodes[index]!).searchParams) })
+    : buildNativeProxyLine(names[index]!, outbound, config.tcpFastOpen, config.udpRelay));
   const surgeProfile = await buildSurgeProfile({ config, proxyLines, nodeNames: names });
-  await validateSurgeProfile(surgeProfile.updated, config.surgeConfigPath);
+  const validation = await validateSurgeProfile(surgeProfile.updated, config.surgeConfigPath);
   const previousNativeBlock = surgeProfile.source.match(/# vless start([\s\S]*?)# vless end/)?.[1] ?? '';
   const previousNativeNames = previousNativeBlock
     .split('\n')
-    .map((line) => line.match(/^\s*(.*?)\s*=\s*vless\s*,/i)?.[1]?.trim())
+    .map((line) => line.match(/^\s*(.*?)\s*=\s*(?:vless|ss|vmess|trojan|anytls|hysteria2|tuic(?:-v5)?)\s*,/i)?.[1]?.trim())
     .filter((name): name is string => Boolean(name));
   const previousNativeNameSet = new Set(previousNativeNames);
   const nextNativeNameSet = new Set(names);
@@ -1471,9 +1505,9 @@ export const syncNativeSurgeToSurge = async (config: CliConfig, { dryRun = false
         surgeConfigPath: config.surgeConfigPath,
         outputDir: config.outputDir,
         runtimeMode: 'surge-native' as const,
-        engineLabel: 'Surge 原生 VLESS',
-        proxyFormat: '原生 VLESS',
-        validationSummary: 'Surge 原生 VLESS 配置已通过校验',
+        engineLabel: 'Surge 原生',
+        proxyFormat: '原生多协议',
+        validationSummary: validation.checked ? 'Surge 原生 VLESS / 多协议配置已通过校验' : validation.warning!,
         nodes: names.map((name, index) => ({ name, server: outbounds[index]!.server, port: outbounds[index]!.server_port })),
       },
     };
@@ -1806,7 +1840,7 @@ export const runCommonDoctorChecks = async (config: CliConfig) => {
   checks.push({
     label: 'nodeSources',
     level: subscriptionUrls.length + vlessNodes.length > 0 ? 'ok' : 'fail',
-    detail: `${subscriptionUrls.length} active subscription URLs, ${vlessNodes.length} direct VLESS nodes`,
+    detail: `${subscriptionUrls.length} active subscription URLs, ${vlessNodes.length} direct ${config.runtimeMode === 'surge-native' ? 'proxy' : 'VLESS'} nodes`,
   });
 
   const surgeConfigExists = Boolean(config.surgeConfigPath) && (await pathExists(config.surgeConfigPath));
@@ -1912,12 +1946,12 @@ export const runNativeDoctor = async (config: CliConfig) => {
   const profileExists = Boolean(config.surgeConfigPath) && (await pathExists(config.surgeConfigPath));
   const profile = profileExists ? await readTextFile(config.surgeConfigPath) : '';
   const managedBlock = profile.match(/# vless start([\s\S]*?)# vless end/);
-  const nodeCount = managedBlock?.[1]?.split('\n').filter((line) => /^\s*[^#].*=\s*vless\s*,/i.test(line)).length ?? 0;
+  const nodeCount = managedBlock?.[1]?.split('\n').filter((line) => /^\s*[^#].*=\s*(?:vless|ss|vmess|trojan|anytls|hysteria2|tuic(?:-v5)?)\s*,/i.test(line)).length ?? 0;
   checks.splice(Math.min(2, checks.length), 0, {
     label: 'surge-native',
     level: profileExists ? 'ok' : 'fail',
     detail: profileExists
-      ? `${nodeCount} native VLESS policies in ${config.surgeConfigPath}`
+      ? `${nodeCount} native proxy policies in ${config.surgeConfigPath}`
       : 'Surge profile not found',
   });
   return reportDoctorChecks(checks);

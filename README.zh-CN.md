@@ -6,26 +6,35 @@
 
 [English README](./README.md) · [更新日志](./CHANGELOG.zh-CN.md)
 
-![Surge VLESS Bridge 桌面应用](./docs/images/dual-engine-external-1180x780.png)
+![Surge VLESS Bridge 1.8.7 桌面应用，使用示例数据](./docs/images/desktop-overview-1.8.7.png)
 
-**让 Surge Mac 支持 VLESS，并可选择 sing-box External、Mihomo 网关或 Surge 原生 VLESS。** External 模式保持原有每节点进程，Mihomo 模式使用单个后台进程和回环 SOCKS5 listeners，原生模式直接写入 Surge 的 `vless` 策略。
+截图使用隔离的示例数据。
 
-Surge Mac 6.12.0 起原生支持 VLESS。该工具可读取明文、Base64、Clash YAML 和 Clash JSON 订阅，
+**将订阅转换为 Surge 策略，并可选择 sing-box External、Mihomo 网关或 Surge 原生。** External 模式保持每节点 VLESS 进程，Mihomo 模式使用单个后台进程和回环 SOCKS5 listeners 承载 VLESS，原生模式按各节点协议写入 Surge 对应策略。
+
+Surge Mac 6.12.0 起原生支持 VLESS。该工具可读取明文 VLESS 或混合 V2Ray/Xray 链接、Base64、Clash YAML 和 Clash JSON 订阅，
+原生模式导入已映射的协议，外部内核模式提取 VLESS，
 按来源保留最近一次有效结果，并在某个订阅临时不可用时避免清空仍可工作的节点。
 
 ## 前置条件
 
 - External 模式需要 [sing-box](https://github.com/SagerNet/sing-box)（`brew install sing-box`）；Mihomo 模式需要 Mihomo，可在桌面应用中安装
-- 原生 VLESS 模式需要 Surge Mac 6.12.0 或更高版本，无需外部内核
+- 原生 VLESS 需要 Surge Mac 6.12.0 或更高版本；SS、VMess、Trojan、AnyTLS、Hysteria2 和 TUIC 使用各自原生策略，无需外部内核
 - Surge Mac 配置文件中包含 `[Proxy]` 和 `[Proxy Group]` 区块
 
 ## macOS 桌面应用
 
 仓库包含 Electron 桌面界面，可以管理带名称的订阅、切换运行引擎、预览更新、执行同步、检查并修复环境、
 安装内核、配置 DNS、恢复备份和管理 macOS 定时任务。界面还会显示当前流量链路、Mihomo 最近日志、
-中断更新恢复，以及仅在订阅直连失败后使用的可选 HTTP/HTTPS 代理重试。旧配置继续使用 External 模式；Surge 原生 VLESS 需要 Surge Mac 6.12.0 或更高版本。
+中断更新恢复，以及仅在订阅直连失败后使用的可选 HTTP/HTTPS 代理重试。旧配置继续使用 External 模式；原生模式可直接转换已映射的多协议节点。
 
 定时任务由当前用户的 macOS LaunchAgent 执行。启用并保存后，即使关闭桌面窗口也会继续按计划同步。
+
+「节点诊断」支持三种运行方式的 TCP/HTTP 与 UDP 检测，延迟显示整数毫秒。Surge 原生使用自身 CLI，旧版缺少 UDP 命令时提示未测试。External/Mihomo 使用本机 SOCKS5 链路，需开启 UDP 转发。
+
+「策略组」集中选择成员关系，预览后同步生效。「历史与恢复」集中显示日志、备份和维护操作，并可导出不含订阅地址、节点凭据、完整路径和日志正文的诊断摘要。设置页支持快速选择最近的 Surge 配置文件，只改变 Bridge 写入目标，不切换 Surge 活动档案。
+
+「设置 > 外观」支持跟随系统、浅色和深色，点击即时生效并记住选择。运行引擎选择和配置向导使用各引擎官方来源的图标，离线显示。外观偏好不会修改 Surge 配置或订阅。
 
 ```bash
 npm install
@@ -45,11 +54,19 @@ GitHub Actions 会在原生 Intel 和 Apple 芯片 runner 上分别构建。Inte
 `arm64`，成品位于对应工作流运行记录的 Artifacts 区域。
 推送 `v1.6.0` 这类版本标签后，验证通过的两个 DMG 和 SHA-256 文件会自动发布到 GitHub Releases。
 
-## Surge 原生 VLESS
+## Surge 原生多协议
 
-桌面应用的配置向导和「设置 > 运行引擎」均可选择「Surge 原生 VLESS」。CLI 配置使用
+「设置 > AnyTLS TLS 与连接」支持为指定服务器与端口分别覆盖 SNI、证书校验名称和连接复用。定时任务使用同一 `anytlsSniOverrides` 设置，例如 `{ "server": "node.example.com", "port": 443, "sni": "sni.example.com", "certificateVerifyName": "cert.example.com", "reuse": true }`。各项可独立恢复跟随订阅，旧版 SNI 设置继续兼容。不修改密码、ALPN 或跳过校验选择，不自动猜测服务器身份。完整映射和版本要求见[原生参数说明](docs/native-parameters.zh-CN.md)。
+
+桌面应用的配置向导和「设置 > 运行引擎」均可选择「Surge 原生」。CLI 配置使用
 `"runtimeMode": "surge-native"`，并完成运行方式确认。同步直接更新 Surge `[Proxy]` 与策略组，
 保留预览、备份和定时同步，不创建本地监听端口。
+
+原生模式支持 VLESS、SS、VMess、Trojan、AnyTLS、Hysteria2（含 `hy2://`）、TUIC v4 和 TUIC v5 的链接、Base64 及 Clash YAML/JSON。AnyTLS 转为独立的 `anytls` 策略，保留密码与 TLS 设置。Hysteria 1、SSR 和未知协议显示兼容提示；未映射的传输或重要参数明确报错，并保留该来源上次成功缓存。可在「筛选与兼容」中选择跳过已识别的不兼容节点。
+
+External 与 Mihomo 仍只转换 VLESS，其他协议会提示未导入。本版不支持 V2Ray/Xray `outbounds` 完整 JSON 配置。QUIC 属于传输层；Hysteria2 和 TUIC 各自使用对应协议类型。
+
+参数依据：[AnyTLS](https://manual.nssurge.com/policies/anytls.html)、[Shadowsocks](https://manual.nssurge.com/policies/shadowsocks.html)、[VMess](https://manual.nssurge.com/policies/vmess.html)、[Hysteria2](https://manual.nssurge.com/policies/hysteria2.html)、[TUIC](https://manual.nssurge.com/policies/tuic.html)。
 
 Reality + Vision 节点生成示例：
 
@@ -64,7 +81,7 @@ Example = vless, node.example.com, 443, username=00000000-0000-4000-8000-0000000
 - Surge 的 Reality 固定使用 Chrome ClientHello，分享链接的 `fp` 和 Clash 的 `client-fingerprint` 不会原样保留。
 - Reality 使用自身握手验证，`skip-cert-verify` 不参与其证书验证。
 - Surge 原生 VLESS 内置 XUDP，无需额外写 `udp-relay=true`。
-- 基础 XHTTP 可转换；XHTTP `extra` 细分参数尚未映射，转换时会明确报错。
+- XHTTP `extra` 支持官方客户端填充、上传、请求头与 XMUX 参数。独立下载、未知字段和未映射字段明确报错。
 
 Surge Mac 6.12.0+ 的代理编辑器支持 `vless://` 分享链接：点击「Share Link」旁的「Import…」，
 粘贴链接导入。该入口也支持 `Name = vless, ...` 策略行。分享链接导入属于 Surge 自身功能。
@@ -213,7 +230,7 @@ surge-vless-bridge doctor
 | `udpRelay`           | `false`                                | 为 external 节点写入 `udp-relay=true` |
 | `udpTestEnabled`     | `false`                                | 为启用 UDP 的节点写入 `test-udp`      |
 | `udpTestTarget`      | `"apple.com@8.8.8.8"`                | Surge UDP 测试使用的域名和 IPv4       |
-| `tcpFastOpen`        | `false`                                | 为 External、Mihomo 或原生 VLESS 开启 TCP Fast Open |
+| `tcpFastOpen`        | `false`                                | 为 External、Mihomo 或原生协议开启 TCP Fast Open |
 | `connectTimeoutEnabled` | `false`                             | External 模式使用自定义远程连接超时   |
 | `connectTimeoutSeconds` | `10`                               | External 模式的远程连接超时秒数             |
 | `subscriptionProxyUrl` | `""`                                | 仅在订阅直连失败后重试的 HTTP/HTTPS 代理地址 |
@@ -227,7 +244,7 @@ UDP ASSOCIATE。上游节点不支持 UDP，或只需要 TCP 流量时保持关�
 
 开启 `udpTestEnabled` 后，Surge external 节点会增加 `test-udp=域名@IPv4`。该项依赖 `udpRelay`，默认测试目标为 `apple.com@8.8.8.8`。
 
-`tcpFastOpen` 在三种运行方式中均可用。自定义连接超时仅用于 External，会向 sing-box outbound 写入 `connect_timeout=秒数s`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，因此使用内核默认值。Surge 原生 VLESS 要求 Surge Mac 6.12.0 或更高版本，直接生成 `vless` 策略，不创建本地端口。
+`tcpFastOpen` 在三种运行方式中均可用。自定义连接超时仅用于 External，会向 sing-box outbound 写入 `connect_timeout=秒数s`。Mihomo VLESS proxy schema 没有每节点 `connect-timeout` 字段，因此使用内核默认值。原生 VLESS 要求 Surge Mac 6.12.0 或更高版本，原生多协议直接生成对应策略，不创建本地端口。
 
 `subscriptionProxyUrl` 只在订阅直连失败后使用，支持不带认证信息的 `http://` 或 `https://` 代理地址。
 它不会改变 Surge 流量路径或 VLESS 节点路由。

@@ -6,19 +6,21 @@
 
 [中文文档](./README.zh-CN.md) · [Changelog](./CHANGELOG.md)
 
-![Surge VLESS Bridge desktop app](./docs/images/dual-engine-external-1180x780.png)
+![Surge VLESS Bridge 1.8.7 desktop app with example data](./docs/images/desktop-overview-1.8.7.png)
 
-**Surge Mac VLESS support with selectable sing-box External, Mihomo gateway, and Surge native VLESS runtimes.** External mode keeps the existing per-node process model. Mihomo mode uses one background process with loopback SOCKS5 listeners. Native mode writes Surge `vless` policies directly and requires Surge Mac 6.12.0 or newer.
+Screenshot uses isolated example data.
 
-Older Surge Mac versions do not natively support the VLESS protocol. This tool reads raw, Base64,
-Clash YAML, or Clash JSON subscriptions, keeps the last valid result from each source, and updates your Surge
+**Surge Mac subscription conversion with selectable sing-box External, Mihomo gateway, and Surge native runtimes.** External mode keeps the existing per-node VLESS process model. Mihomo mode uses one background process with loopback SOCKS5 listeners for VLESS. Native mode writes each supported protocol to its corresponding Surge policy type. Native VLESS requires Surge Mac 6.12.0 or newer.
+
+Older Surge Mac versions do not natively support the VLESS protocol. This tool reads raw VLESS or mixed
+V2Ray/Xray URL lists, Base64, Clash YAML, or Clash JSON subscriptions, keeps the last valid result from each source, and updates your Surge
 profile without discarding working nodes when one provider is temporarily unavailable.
 
 ## Prerequisites
 
 - [sing-box](https://github.com/SagerNet/sing-box) installed (`brew install sing-box`) when using External mode
 - Mihomo installed when using the gateway mode; the desktop app can install it
-- Surge Mac 6.12.0 or newer for native VLESS; this mode needs no external core
+- Surge Mac 6.12.0 or newer for native VLESS; native SS, VMess, Trojan, AnyTLS, Hysteria2 and TUIC use their own policy types without an external core
 - Surge Mac with a profile containing `[Proxy]` and `[Proxy Group]` sections
 
 ## macOS desktop app
@@ -27,10 +29,23 @@ The Electron desktop app manages named subscriptions, selects the runtime, previ
 syncs, repairs the local environment, installs or updates either core, restores backups, and creates a
 background macOS schedule. It also shows the active traffic path, recent Mihomo logs, interrupted-update
 recovery, and an optional HTTP/HTTPS proxy retry used only when a subscription cannot be downloaded directly.
-Existing configurations continue to use External mode.
+Existing configurations continue to use External mode. Native mode can convert supported protocols without installing an external core.
 
 The schedule is installed as a per-user macOS LaunchAgent. After it is enabled, the desktop window does not
 need to remain open for scheduled syncs to run.
+
+Node Diagnostics tests TCP/HTTP and UDP across all three runtimes, with integer millisecond timing.
+Native mode uses Surge's CLI and reports UDP as untested when an older command set lacks support.
+External/Mihomo probe their local SOCKS5 listeners and require UDP relay to be enabled.
+
+Policy Groups provides membership selection; previews show changes before sync. History & Recovery
+collects logs, backups and maintenance actions, with a redacted diagnostic summary that excludes source
+URLs, credentials, full paths and log contents. Recent profile selection changes Bridge's write target;
+it does not switch the active profile inside Surge.
+
+Settings > Appearance offers System, Light and Dark modes. Choices apply immediately and persist across
+restarts. Engine selection and setup use locally bundled artwork from each engine's official site.
+Appearance preferences do not change Surge profiles or subscriptions.
 
 ```bash
 npm install
@@ -43,11 +58,19 @@ GitHub Actions builds both macOS architectures on native runners. Download `x64`
 `arm64` for Apple Silicon from the workflow run's Artifacts section.
 Pushing a version tag such as `v1.6.0` automatically publishes both verified DMGs and their SHA-256 files to GitHub Releases.
 
-## Surge native VLESS
+## Surge native protocols
 
-Choose Surge Native VLESS in the desktop setup wizard or under Settings > Runtime Engine. CLI configurations
+Native settings provide independent AnyTLS SNI, certificate verification name and connection reuse overrides for each server and port. Manual and scheduled syncs share `anytlsSniOverrides`, for example `{ "server": "node.example.com", "port": 443, "sni": "sni.example.com", "certificateVerifyName": "cert.example.com", "reuse": true }`. Each field can follow the source independently. Existing SNI-only settings remain compatible. Credentials, ALPN and skip-verification choices stay unchanged. See the [native parameter reference](docs/native-parameters.zh-CN.md) for mappings and version requirements.
+
+Choose Surge Native in the desktop setup wizard or under Settings > Runtime Engine. CLI configurations
 use `"runtimeMode": "surge-native"` and require runtime confirmation. Sync updates Surge policies and groups
 directly, retaining previews, backups and scheduled updates without creating local listeners.
+
+Native mode converts VLESS, SS, VMess, Trojan, AnyTLS, Hysteria2 (`hy2://` included), TUIC v4 and TUIC v5 from URI lists, Base64 and Clash YAML/JSON. AnyTLS is emitted as `anytls` with its own password and TLS settings. Hysteria 1, SSR and unknown protocols produce compatibility notices. Unmapped transport or required fields produce explicit errors; the source's last successful cache remains available. The optional skip-unsupported setting can omit identified incompatible nodes.
+
+External and Mihomo continue to import VLESS only and report other protocols as not imported. This release does not add general V2Ray/Xray `outbounds` JSON import. QUIC is a transport; Hysteria2 and TUIC retain their own policy types.
+
+References: [AnyTLS](https://manual.nssurge.com/policies/anytls.html), [Shadowsocks](https://manual.nssurge.com/policies/shadowsocks.html), [VMess](https://manual.nssurge.com/policies/vmess.html), [Hysteria2](https://manual.nssurge.com/policies/hysteria2.html), [TUIC](https://manual.nssurge.com/policies/tuic.html).
 
 Example Reality + Vision output:
 
@@ -62,7 +85,7 @@ This is a syntax example. Replace the domains, user ID, public key and short ID 
 - Surge Reality always uses Chrome's ClientHello. Share-link `fp` and Clash `client-fingerprint` values are not preserved.
 - Reality verifies the server through its own handshake; `skip-cert-verify` does not apply to that verification.
 - Native VLESS includes XUDP and needs no extra `udp-relay=true` parameter.
-- Basic XHTTP conversion is supported. Unmapped XHTTP `extra` options produce an explicit conversion error.
+- XHTTP `extra` maps documented client padding, upload, header and XMUX options. Separate download settings and unknown or unmapped fields produce explicit errors.
 
 Surge Mac 6.12.0+ can import `vless://` links in its proxy editor: click Import… next to Share Link and paste
 the link. The same entry accepts `Name = vless, ...` policy lines. This import feature belongs to Surge itself.

@@ -1,9 +1,21 @@
+/**
+ * [INPUT]: Clash YAML/JSON and runtime-specific subscription options.
+ * [OUTPUT]: VLESS links, or supported native protocol links for Surge native mode.
+ * [POS]: Structured subscription adapter with explicit incompatible-field reporting.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 import { isAlias, isScalar, parseDocument, Scalar, visit } from 'yaml';
 import { SubscriptionError } from './subscription-error';
+import { clashNativeProxyToLink } from '../native/clash';
+import { parseNativeProxy, proxyProtocolLabel, supportsNativeProtocol, UnsupportedNativeNodeError } from '../native/proxy';
+import { normalizeCertificateFingerprint } from '../native/tls';
+import { nativePolicyParameters } from '../native/parameters';
 
 export type SubscriptionParseOptions = {
   skipUnsupported?: boolean;
   onSkipped?: (reason: string) => void;
+  native?: boolean;
+  onNotice?: (message: string) => void;
 };
 
 class UnsupportedNodeError extends SubscriptionError {}
@@ -13,7 +25,7 @@ const record = (value: unknown): Record<string, unknown> =>
 const string = (value: unknown) => typeof value === 'string' ? value : '';
 const enabled = (value: unknown) => value === true || value === 'true' || value === 1;
 
-const clashProxyToVless = (proxy: Record<string, unknown>, index: number): string => {
+const clashProxyToVless = (proxy: Record<string, unknown>, index: number, native = false): string => {
   const fail = (reason: string): never => {
     throw new SubscriptionError(`Clash 第 ${index + 1} 个节点：${reason}`);
   };
@@ -39,8 +51,18 @@ const clashProxyToVless = (proxy: Record<string, unknown>, index: number): strin
   params.set('encryption', 'none');
 
   // These options cannot be represented by the shared sing-box/Mihomo node model.
-  for (const key of ['encryption', 'fingerprint', 'certificate', 'private-key', 'name-cert-verify', 'dialer-proxy']) {
+  for (const key of ['encryption', 'fingerprint', 'certificate', 'private-key', 'name-cert-verify', 'client-cert', 'dialer-proxy']) {
+    if (native && ['encryption', 'fingerprint', 'name-cert-verify', 'client-cert'].includes(key)) continue;
     if (proxy[key] && proxy[key] !== 'none') unsupported(`暂不支持 ${key}。`);
+  }
+  if (native) {
+    for (const key of ['encryption', 'name-cert-verify']) {
+      if (proxy[key] !== undefined && typeof proxy[key] !== 'string') fail(`${key} 必须为字符串。`);
+    }
+    for (const [key, value] of Object.entries(nativePolicyParameters(proxy))) params.set(key, value);
+    params.set('encryption', string(proxy.encryption) || 'none');
+    if (proxy.fingerprint) params.set('pcs', normalizeCertificateFingerprint(proxy.fingerprint));
+    if (proxy['name-cert-verify']) params.set('vcn', string(proxy['name-cert-verify']));
   }
   for (const key of ['ech-opts', 'shadow-tls-opts', 'restls-opts', 'jls-opts']) {
     if (Object.keys(record(proxy[key])).length) unsupported(`暂不支持 ${key}。`);
@@ -48,10 +70,10 @@ const clashProxyToVless = (proxy: Record<string, unknown>, index: number): strin
   if (enabled(record(proxy.smux).enabled)) unsupported('暂不支持 smux。');
 
   const network = string(proxy.network).toLowerCase() || 'tcp';
-  if (!['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'splithttp'].includes(network)) {
+  if (!['tcp', 'raw', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'splithttp'].includes(network)) {
     unsupported('暂不支持该 network，仅支持 TCP、WS、gRPC、HTTP Upgrade 和 XHTTP。');
   }
-  params.set('type', network === 'splithttp' ? 'xhttp' : network);
+  params.set('type', network === 'splithttp' ? 'xhttp' : network === 'raw' ? 'tcp' : network);
   const ws = record(proxy['ws-opts']);
   const headers = record(ws.headers ?? proxy['ws-headers']);
   if (network === 'ws') {
@@ -74,6 +96,8 @@ const clashProxyToVless = (proxy: Record<string, unknown>, index: number): strin
   } else if (network === 'grpc') {
     const grpc = record(proxy['grpc-opts']);
     params.set('serviceName', string(grpc['grpc-service-name'] ?? grpc['service-name']));
+    if (native && grpc.authority) params.set('authority', string(grpc.authority));
+    if (native && grpc.mode) params.set('mode', string(grpc.mode));
   } else if (network === 'httpupgrade') {
     const upgrade = record(proxy['httpupgrade-opts']);
     params.set('path', string(upgrade.path) || '/');
@@ -155,16 +179,27 @@ export const parseClashVlessNodes = (raw: string, options: SubscriptionParseOpti
   let skipped = 0;
   const nodes = document.proxies.flatMap((entry, index) => {
     const proxy = record(entry);
-    if (string(proxy.type).toLowerCase() !== 'vless') return [];
     try {
-      return [clashProxyToVless(proxy, index)];
+      const type = string(proxy.type).toLowerCase();
+      if (type !== 'vless') {
+        if (!options.native || !supportsNativeProtocol(`${type}://node`)) {
+          options.onNotice?.(`Clash 第 ${index + 1} 个节点：当前运行方式尚未映射 ${proxyProtocolLabel(`${type}://node`)}，此节点未导入。`);
+          return [];
+        }
+        const link = clashNativeProxyToLink(proxy, index);
+        parseNativeProxy(link, index, options.onNotice);
+        return [link];
+      }
+      const link = clashProxyToVless(proxy, index, options.native);
+      if (options.native && proxy['client-fingerprint']) options.onNotice?.(`Clash 第 ${index + 1} 个节点：Surge 原生使用自身 TLS 指纹，订阅的自定义指纹不参与转换。`);
+      return [link];
     } catch (error) {
-      if (!options.skipUnsupported || !(error instanceof UnsupportedNodeError)) throw error;
+      if (!options.skipUnsupported || !(error instanceof UnsupportedNodeError || error instanceof UnsupportedNativeNodeError)) throw error;
       skipped += 1;
       options.onSkipped?.(error.message);
       return [];
     }
   });
-  if (skipped && nodes.length === 0) throw new SubscriptionError(`已跳过 ${skipped} 个不兼容节点，没有可用 VLESS 节点，保留原有配置。`);
+  if (skipped && nodes.length === 0) throw new SubscriptionError(`已跳过 ${skipped} 个不兼容节点，没有可用${options.native ? '' : ' VLESS'}节点，保留原有配置。`);
   return nodes;
 };

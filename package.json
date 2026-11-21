@@ -1,7 +1,7 @@
 {
   "name": "surge-vless-bridge",
-  "version": "1.8.2-beta.5",
-  "description": "Surge Mac VLESS support with selectable sing-box External, Mihomo gateway and native VLESS runtimes.",
+  "version": "1.8.7",
+  "description": "Surge native multi-protocol subscription conversion with optional sing-box External and Mihomo VLESS runtimes.",
   "license": "MIT",
   "author": "chen86860",
   "keywords": [
@@ -76,7 +76,10 @@
           "index.html",
           "styles.css",
           "app.js",
-          "boot.js"
+          "boot.js",
+          "theme.js",
+          "theme.css",
+          "assets/engines/**/*"
         ]
       },
       {
@@ -107,7 +110,9 @@
   "files": [
     "dist",
     "docs/desktop-app.zh-CN.md",
+    "docs/native-parameters.zh-CN.md",
     "docs/images",
+    "desktop/assets/engines/SOURCES.md",
     "LICENSE",
     "README.md",
     "README.zh-CN.md",

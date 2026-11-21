@@ -1,3 +1,9 @@
+/**
+ * [INPUT]: Node test runner and compiled subscription and backend converters.
+ * [OUTPUT]: Regression coverage for download, format detection and VLESS field preservation.
+ * [POS]: Public parser boundary tests with synthetic subscriptions and loopback HTTP servers.
+ * [PROTOCOL]: Update this header on change, then check AGENTS.md
+ */
 const assert = require('node:assert/strict');
 const { createServer } = require('node:http');
 const test = require('node:test');
@@ -110,6 +116,60 @@ test('preserves literal link punctuation, IPv6 and Base64 variants without scrap
   assert.deepEqual(parseSubscriptionNodes(`# vless://secret@example.com:443\n${link}\r\n${link}`), [link]);
   assert.throws(() => parseSubscriptionNodes(`<html>${link}</html>`), /HTML/);
   assert.deepEqual(parseSubscriptionNodes(`proxies: []\n# ${link}`), []);
+});
+
+test('mixed V2Ray link subscriptions retain VLESS beside AnyTLS and other protocols', () => {
+  const links = Array.from({ length: 20 }, (_, index) => `vless://u${index}@node.example:443?security=tls#Node${index}`);
+  const body = [
+    '# Synthetic mixed subscription',
+    ...Array.from({ length: 6 }, () => 'vmess://eyJ2IjoiMiJ9'),
+    'anytls://test-only@anytls.example:443#AnyTLS',
+    ...links,
+    ...Array.from({ length: 11 }, () => 'hy2://test-only@hy2.example:443#HY2'),
+    'future-protocol+v2://test-only@future.example:443#Future',
+  ].join('\r\n');
+  for (const raw of [body, Buffer.from(body).toString('base64'), Buffer.from(body).toString('base64url')]) {
+    assert.deepEqual(parseSubscriptionNodes(raw), links);
+  }
+});
+
+test('URI protocol matrix preserves VLESS and ignores non-VLESS peers across encodings', () => {
+  const schemes = ['ss', 'ssr', 'vmess', 'trojan', 'hysteria', 'hy', 'hysteria2', 'hy2',
+    'hysteria2+realm', 'tuic', 'tuic-v5', 'anytls', 'snell', 'wireguard', 'socks', 'socks4',
+    'socks5', 'http', 'https', 'quic', 'future+protocol.v2'];
+  const link = 'VLESS://u@[2001:db8::1]:443?security=tls#HK 01 中文';
+  const encode = [value => value, value => Buffer.from(value).toString('base64'),
+    value => Buffer.from(value).toString('base64url').replace(/.{24}/g, '$&\n')];
+  for (const scheme of schemes) {
+    const peer = `${scheme}://test-only@peer.example:443#Other node`;
+    for (const transform of encode) {
+      assert.deepEqual(parseSubscriptionNodes(transform(`# comment\r${peer}\r${link}\r${link}`)), [link], scheme);
+      assert.deepEqual(parseSubscriptionNodes(transform(peer)), [], scheme);
+    }
+  }
+});
+
+test('mixed Clash YAML and JSON subscriptions ignore other proxy types without altering VLESS', () => {
+  const proxy = { name: 'VLESS', type: 'vless', server: 'node.example', port: 443, uuid: 'u', tls: true };
+  const types = ['ss', 'ssr', 'vmess', 'trojan', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'wireguard', 'future-protocol'];
+  const expected = parseSubscriptionNodes(JSON.stringify({ proxies: [proxy] }));
+  const peers = types.map(type => ({ type, name: type, server: 'peer.example', port: 443 }));
+  const json = JSON.stringify({ proxies: [...peers, proxy] });
+  const yaml = `proxies:\n${[...peers, proxy].map(item => `  - ${JSON.stringify(item)}`).join('\n')}`;
+  for (const raw of [json, yaml, Buffer.from(json).toString('base64'), Buffer.from(yaml).toString('base64url')]) {
+    assert.deepEqual(parseSubscriptionNodes(raw), expected);
+  }
+});
+
+test('link-list detection rejects non-link error text and does not scrape commented or HTML nodes', () => {
+  const link = 'vless://u@node.example:443#V';
+  for (const raw of [`Subscription expired\n${link}`, `<html>\n${link}\n</html>`,
+    `anytls://test-only@peer.example:443\nError: unauthorized\n${link}`]) {
+    for (const body of [raw, Buffer.from(raw).toString('base64')]) {
+      assert.throws(() => parseSubscriptionNodes(body));
+    }
+  }
+  assert.deepEqual(parseSubscriptionNodes(`anytls://test-only@peer.example:443\n# ${link}`), []);
 });
 
 test('preserves JSON Reality, TLS, ALPN and encoded names through both backends', () => {
@@ -341,4 +401,50 @@ test('retries a failed subscription download through the configured proxy', asyn
   assert.equal(nodes.length, 1);
   assert.equal(attempts, 2);
   mock.mock.restore();
+});
+
+test('retries transient gateway failures once and keeps authentication failures immediate', async t => {
+  let calls = 0;
+  const mock = t.mock.method(globalThis, 'fetch', async () => {
+    calls += 1;
+    return calls === 1 ? new Response('SECRET', { status: 522 }) : new Response('proxies: []');
+  });
+  const options = { subscriptionUrl: 'https://sub.example/private/SECRET' };
+  assert.deepEqual(await getVlessSubscriptionNodes(options), []);
+  assert.equal(calls, 2);
+  calls = 0;
+  mock.mock.mockImplementation(async () => { calls += 1; return new Response('SECRET', { status: 502 }); });
+  await assert.rejects(getVlessSubscriptionNodes(options), error => {
+    assert.match(error.message, /HTTP 502.*已重试一次/);
+    assert.doesNotMatch(error.message, /SECRET/);
+    return true;
+  });
+  assert.equal(calls, 2);
+  calls = 0;
+  mock.mock.mockImplementation(async () => { calls += 1; return new Response('SECRET', { status: 403 }); });
+  await assert.rejects(getVlessSubscriptionNodes(options), /HTTP 403/);
+  assert.equal(calls, 1);
+});
+
+test('reports safe DNS, TLS and aggregate timeout causes without remote payloads', async t => {
+  let calls = 0;
+  const mock = t.mock.method(globalThis, 'fetch', async () => {});
+  for (const [code, detail, retries] of [
+    ['ENOTFOUND', /域名解析失败/, 1],
+    ['CERT_HAS_EXPIRED', /TLS 证书校验失败/, 1],
+    ['UND_ERR_CONNECT_TIMEOUT', /请求超时/, 2],
+    ['ECONNREFUSED', /连接被拒绝/, 1],
+  ]) {
+    calls = 0;
+    mock.mock.mockImplementation(async () => {
+      calls += 1;
+      throw new TypeError('SECRET', { cause: new AggregateError([Object.assign(new Error('SECRET'), { code })]) });
+    });
+    await assert.rejects(getVlessSubscriptionNodes({ subscriptionUrl: 'https://sub.example/private/SECRET' }), error => {
+      assert.match(error.message, detail);
+      assert.doesNotMatch(error.message, /SECRET|private/);
+      return true;
+    });
+    assert.equal(calls, retries);
+  }
 });
